@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, Type, type GenerateContentConfig } from '@google/genai';
 import { MASTER_CV } from './master-cv';
 import {
   CV_LIMITS,
@@ -9,7 +9,18 @@ import {
 import { resolveCandidateUrl } from './jina';
 import type { ExtractedJobCandidate, TailoredCV } from './types';
 
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODELS = Array.from(
+  new Set(
+    [
+      process.env.GEMINI_MODEL || 'gemini-3.8-flash',
+      'gemini-3.7-flash',
+      'gemini-3.6-flash',
+      'gemini-3.5-flash',
+    ].filter(Boolean),
+  ),
+);
+
+const FALLBACK_STATUS_CODES = new Set([404, 429, 503]);
 
 function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -17,6 +28,47 @@ function getGeminiClient(): GoogleGenAI {
     throw new Error('Missing GEMINI_API_KEY environment variable.');
   }
   return new GoogleGenAI({ apiKey });
+}
+
+function getHttpStatus(error: unknown): number | undefined {
+  if (typeof error === 'object' && error !== null && 'status' in error) {
+    const status = (error as { status?: unknown }).status;
+    if (typeof status === 'number') return status;
+  }
+  return undefined;
+}
+
+async function generateJsonWithFallback(
+  ai: GoogleGenAI,
+  prompt: string,
+  config: GenerateContentConfig,
+): Promise<string | undefined> {
+  let lastError: unknown;
+
+  for (let i = 0; i < GEMINI_MODELS.length; i++) {
+    const model = GEMINI_MODELS[i];
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: prompt,
+        config,
+      });
+      return response.text;
+    } catch (error) {
+      lastError = error;
+      const status = getHttpStatus(error);
+      const hasNext = i < GEMINI_MODELS.length - 1;
+      if (hasNext && status !== undefined && FALLBACK_STATUS_CODES.has(status)) {
+        console.warn(
+          `[gemini] Model ${model} returned ${status}; falling back to ${GEMINI_MODELS[i + 1]}`,
+        );
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError;
 }
 
 function parseJsonText(rawText: string | undefined): unknown {
@@ -53,34 +105,30 @@ export async function extractMatchingJobs(
     markdown,
   ].join('\n');
 
-  const response = await ai.models.generateContent({
-    model: GEMINI_MODEL,
-    contents: prompt,
-    config: {
-      temperature: 0.1,
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          jobs: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                title: { type: Type.STRING },
-                company: { type: Type.STRING },
-                url: { type: Type.STRING },
-              },
-              required: ['title', 'company', 'url'],
+  const rawText = await generateJsonWithFallback(ai, prompt, {
+    temperature: 0.1,
+    responseMimeType: 'application/json',
+    responseSchema: {
+      type: Type.OBJECT,
+      properties: {
+        jobs: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              company: { type: Type.STRING },
+              url: { type: Type.STRING },
             },
+            required: ['title', 'company', 'url'],
           },
         },
-        required: ['jobs'],
       },
+      required: ['jobs'],
     },
   });
 
-  const parsedJson = parseJsonText(response.text);
+  const parsedJson = parseJsonText(rawText);
   const validated = jobExtractionResponseSchema.parse(parsedJson);
 
   const seen = new Set<string>();
@@ -156,72 +204,68 @@ export async function analyzeAndTailorJob(
     .filter(Boolean)
     .join('\n');
 
-  const response = await ai.models.generateContent({
-    model: GEMINI_MODEL,
-    contents: prompt,
-    config: {
-      temperature: 0.2,
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          company: { type: Type.STRING },
-          title: { type: Type.STRING },
-          match_score: { type: Type.INTEGER },
-          summary_hebrew: { type: Type.STRING },
-          changes_made: { type: Type.STRING },
-          tailored_cv_json: {
-            type: Type.OBJECT,
-            properties: {
-              summary: { type: Type.STRING },
-              experience: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    role: { type: Type.STRING },
-                    company: { type: Type.STRING },
-                    period: { type: Type.STRING },
-                    bullets: {
-                      type: Type.ARRAY,
-                      items: { type: Type.STRING },
-                    },
-                  },
-                  required: ['role', 'company', 'period', 'bullets'],
-                },
-              },
-              toolbox: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    category: { type: Type.STRING },
+  const rawText = await generateJsonWithFallback(ai, prompt, {
+    temperature: 0.2,
+    responseMimeType: 'application/json',
+    responseSchema: {
+      type: Type.OBJECT,
+      properties: {
+        company: { type: Type.STRING },
+        title: { type: Type.STRING },
+        match_score: { type: Type.INTEGER },
+        summary_hebrew: { type: Type.STRING },
+        changes_made: { type: Type.STRING },
+        tailored_cv_json: {
+          type: Type.OBJECT,
+          properties: {
+            summary: { type: Type.STRING },
+            experience: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  role: { type: Type.STRING },
+                  company: { type: Type.STRING },
+                  period: { type: Type.STRING },
+                  bullets: {
+                    type: Type.ARRAY,
                     items: { type: Type.STRING },
                   },
-                  required: ['category', 'items'],
                 },
-              },
-              education: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
+                required: ['role', 'company', 'period', 'bullets'],
               },
             },
-            required: ['summary', 'experience', 'toolbox', 'education'],
+            toolbox: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  category: { type: Type.STRING },
+                  items: { type: Type.STRING },
+                },
+                required: ['category', 'items'],
+              },
+            },
+            education: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
           },
+          required: ['summary', 'experience', 'toolbox', 'education'],
         },
-        required: [
-          'company',
-          'title',
-          'match_score',
-          'summary_hebrew',
-          'changes_made',
-          'tailored_cv_json',
-        ],
       },
+      required: [
+        'company',
+        'title',
+        'match_score',
+        'summary_hebrew',
+        'changes_made',
+        'tailored_cv_json',
+      ],
     },
   });
 
-  const parsedJson = parseJsonText(response.text);
+  const parsedJson = parseJsonText(rawText);
   const validated = jobAnalysisResponseSchema.parse(parsedJson);
 
   return {
