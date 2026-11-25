@@ -1,4 +1,5 @@
 import { analyzeAndTailorJob, extractMatchingJobs } from './gemini';
+import { syncSourcesFromGoogleSheet } from './google-sheet';
 import { normalizeAndValidateUrl, scrapeUrlWithJina } from './jina';
 import { getSupabaseAdmin } from './supabase';
 import type { JobRecord, ScanResultSummary, SourceRecord } from './types';
@@ -77,6 +78,15 @@ export async function analyzeSingleJobUrl(
 
 export async function runDailyScan(maxNewJobs = 3): Promise<ScanResultSummary> {
   const supabase = getSupabaseAdmin();
+  const syncErrors: string[] = [];
+
+  try {
+    await syncSourcesFromGoogleSheet();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Google Sheet sync failed';
+    console.warn('[cron/scan] Google Sheet sync warning:', msg);
+    syncErrors.push(`Google Sheet sync: ${msg}`);
+  }
 
   const { data: sourcesData, error: sourcesError } = await supabase
     .from('sources')
@@ -107,7 +117,7 @@ export async function runDailyScan(maxNewJobs = 3): Promise<ScanResultSummary> {
     candidatesFound: 0,
     jobsAdded: 0,
     jobsSkipped: 0,
-    errors: [],
+    errors: [...syncErrors],
     jobs: [],
   };
 

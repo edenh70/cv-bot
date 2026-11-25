@@ -12,14 +12,18 @@ import {
   FileText,
   CheckCircle2,
   AlertCircle,
+  Sheet,
+  RefreshCw,
 } from 'lucide-react';
 import type { JobRecord, ScanResultSummary, SourceRecord } from '@/lib/types';
 
 interface QuickAddAndSourcesTabProps {
   sources: SourceRecord[];
+  sheetUrl: string;
   onJobAnalyzed: (job: JobRecord, alreadyExisted: boolean) => void;
   onScanComplete: (summary: ScanResultSummary) => void;
   onSourcesChanged: () => Promise<void>;
+  onSheetSynced: (sources: SourceRecord[]) => void;
   onJumpToFeed: () => void;
 }
 
@@ -39,9 +43,11 @@ function formatLastScanned(iso: string | null): string {
 
 export function QuickAddAndSourcesTab({
   sources,
+  sheetUrl,
   onJobAnalyzed,
   onScanComplete,
   onSourcesChanged,
+  onSheetSynced,
   onJumpToFeed,
 }: QuickAddAndSourcesTabProps) {
   // Single Job URL analysis state
@@ -63,6 +69,11 @@ export function QuickAddAndSourcesTab({
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResultSummary | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
+
+  // Google Sheet Sync state
+  const [syncingSheet, setSyncingSheet] = useState(false);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
 
   // Per-source action state
   const [busySourceId, setBusySourceId] = useState<string | null>(null);
@@ -160,6 +171,32 @@ export function QuickAddAndSourcesTab({
       }
     } finally {
       setBusySourceId(null);
+    }
+  }
+
+  async function handleSyncSheet() {
+    if (syncingSheet) return;
+    setSyncingSheet(true);
+    setSyncMessage(null);
+    setSyncError(null);
+
+    try {
+      const res = await fetch('/api/sources/sync', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        setSyncError(data.error || 'Failed to sync Google Sheet.');
+        return;
+      }
+
+      setSyncMessage(
+        `Synced ${data.totalInSheet} source${data.totalInSheet === 1 ? '' : 's'} (+${data.added} new, ${data.updated} updated, ${data.deactivated} paused).`,
+      );
+      onSheetSynced(data.sources ?? []);
+    } catch {
+      setSyncError('Network error while syncing Google Sheet.');
+    } finally {
+      setSyncingSheet(false);
     }
   }
 
@@ -296,7 +333,7 @@ export function QuickAddAndSourcesTab({
 
           <button
             type="button"
-            disabled={scanning || sources.filter((s) => s.is_active).length === 0}
+            disabled={scanning}
             onClick={handleScanNow}
             className="flex h-10 shrink-0 items-center gap-1.5 rounded-xl bg-emerald-600 px-3.5 text-xs font-semibold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -312,6 +349,59 @@ export function QuickAddAndSourcesTab({
               </>
             )}
           </button>
+        </div>
+
+        {/* Google Sheet Sync Banner */}
+        <div className="mb-3 rounded-xl border border-slate-200 bg-slate-50/80 p-3 dark:border-slate-800 dark:bg-slate-950/60">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs">
+              <Sheet className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+              <div>
+                <div className="font-semibold text-slate-800 dark:text-slate-100">
+                  Google Sheet Source Sync
+                </div>
+                <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Auto-syncs daily before scan &middot; Columns: Company, URL
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <a
+                href={sheetUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex h-8 items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 text-[11px] font-semibold text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+              >
+                <ExternalLink className="h-3 w-3" />
+                <span>Open Sheet</span>
+              </a>
+
+              <button
+                type="button"
+                disabled={syncingSheet}
+                onClick={handleSyncSheet}
+                className="flex h-8 items-center gap-1 rounded-lg bg-[#003366] px-2.5 text-[11px] font-semibold text-white transition hover:bg-[#004080] disabled:opacity-50 dark:bg-sky-600 dark:hover:bg-sky-500"
+              >
+                <RefreshCw
+                  className={`h-3 w-3 ${syncingSheet ? 'animate-spin' : ''}`}
+                />
+                <span>{syncingSheet ? 'Syncing...' : 'Sync Sheet'}</span>
+              </button>
+            </div>
+          </div>
+
+          {syncMessage && (
+            <p className="mt-2 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
+              {syncMessage}
+            </p>
+          )}
+
+          {syncError && (
+            <p className="mt-2 text-[11px] font-medium text-rose-600 dark:text-rose-400">
+              {syncError}
+            </p>
+          )}
         </div>
 
         {scanError && (

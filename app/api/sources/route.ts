@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { isAuthenticated } from '@/lib/auth';
+import { getConfiguredGoogleSheetUrl } from '@/lib/google-sheet';
 import { normalizeAndValidateUrl } from '@/lib/jina';
 import { getSupabaseAdmin } from '@/lib/supabase';
 
@@ -28,7 +29,10 @@ export async function GET() {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    return NextResponse.json({ sources: data ?? [] });
+    return NextResponse.json({
+      sources: data ?? [],
+      sheetUrl: getConfiguredGoogleSheetUrl(),
+    });
   } catch (error) {
     console.error('[api/sources GET] Error:', error);
     return NextResponse.json(

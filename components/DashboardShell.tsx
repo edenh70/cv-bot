@@ -16,6 +16,7 @@ import {
 import { JobCard } from './JobCard';
 import { QuickAddAndSourcesTab } from './QuickAddAndSourcesTab';
 import { AppliedHistoryTab } from './AppliedHistoryTab';
+import { DEFAULT_GOOGLE_SHEET_URL } from '@/lib/google-sheet';
 import type {
   JobRecord,
   JobStatus,
@@ -35,6 +36,7 @@ export function DashboardShell() {
   const [activeTab, setActiveTab] = useState<TabKey>('feed');
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [sources, setSources] = useState<SourceRecord[]>([]);
+  const [sheetUrl, setSheetUrl] = useState<string>(DEFAULT_GOOGLE_SHEET_URL);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
@@ -74,6 +76,9 @@ export function DashboardShell() {
       if (sourcesRes.ok) {
         const sourcesData = await sourcesRes.json();
         setSources(sourcesData.sources ?? []);
+        if (sourcesData.sheetUrl) {
+          setSheetUrl(sourcesData.sheetUrl);
+        }
       }
     } finally {
       setLoading(false);
@@ -288,9 +293,14 @@ export function DashboardShell() {
             {activeTab === 'sources' && (
               <QuickAddAndSourcesTab
                 sources={sources}
+                sheetUrl={sheetUrl}
                 onJobAnalyzed={handleJobAnalyzed}
                 onScanComplete={handleScanComplete}
                 onSourcesChanged={() => loadData(false)}
+                onSheetSynced={(syncedSources) => {
+                  setSources(syncedSources);
+                  showToast(`Synced ${syncedSources.length} sources from Google Sheet`);
+                }}
                 onJumpToFeed={() => setActiveTab('feed')}
               />
             )}
