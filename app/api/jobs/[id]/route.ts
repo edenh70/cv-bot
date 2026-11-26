@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { isAuthenticated } from '@/lib/auth';
-import { getSupabaseAdmin } from '@/lib/supabase';
+import { getSupabaseAdmin, JOB_PUBLIC_COLUMNS } from '@/lib/supabase';
 
 const updateJobSchema = z.object({
   status: z.enum(['pending_review', 'applied', 'archived']),
@@ -38,7 +38,7 @@ export async function PATCH(
       .from('jobs')
       .update(updates)
       .eq('id', id)
-      .select('*')
+      .select(JOB_PUBLIC_COLUMNS)
       .single();
 
     if (error) {

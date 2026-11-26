@@ -1,6 +1,12 @@
 import { GoogleGenAI, Type, type GenerateContentConfig, type Part } from '@google/genai';
 import mammoth from 'mammoth';
-import { extractDocxInfo, type DocxLayoutMeta } from './docx-template';
+import {
+  applyReplacementsToStructuredCv,
+  extractDocxInfo,
+  normalizeForMatch,
+  sanitizeSurgicalReplacements,
+  type DocxLayoutMeta,
+} from './docx-template';
 import { getDefaultMasterCvTemplate, MASTER_CV } from './master-cv';
 import {
   CV_LIMITS,
@@ -8,13 +14,17 @@ import {
   jobExtractionResponseSchema,
   sanitizeTailoredCV,
   sanitizeUploadedMasterCv,
+  shortenReplacementsResponseSchema,
+  surgicalJobAnalysisResponseSchema,
   uploadedCvParseResponseSchema,
 } from './cv-schema';
 import { resolveCandidateUrl } from './jina';
 import type {
   ExtractedJobCandidate,
   JobExtractionResult,
+  TailorableBlock,
   TailoredCV,
+  TailoringDiffMap,
 } from './types';
 
 const EXTRACTION_MODELS = Array.from(
@@ -167,29 +177,35 @@ export async function extractMatchingJobs(
     .filter(Boolean)
     .join('\n');
 
-  const rawText = await generateJsonWithFallback(ai, prompt, {
-    temperature: 0.1,
-    responseMimeType: 'application/json',
-    responseSchema: {
-      type: Type.OBJECT,
-      properties: {
-        jobs: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              title: { type: Type.STRING },
-              company: { type: Type.STRING },
-              url: { type: Type.STRING },
+  const rawText = await generateJsonWithFallback(
+    ai,
+    prompt,
+    {
+      temperature: 0.1,
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          jobs: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                company: { type: Type.STRING },
+                url: { type: Type.STRING },
+              },
+              required: ['title', 'company', 'url'],
             },
-            required: ['title', 'company', 'url'],
           },
+          nextPageUrl: { type: Type.STRING },
         },
-        nextPageUrl: { type: Type.STRING },
+        required: ['jobs', 'nextPageUrl'],
       },
-      required: ['jobs', 'nextPageUrl'],
     },
-  }, EXTRACTION_MODELS, 15000);
+    EXTRACTION_MODELS,
+    15000,
+  );
 
   const parsedJson = parseJsonText(rawText);
   const validated = jobExtractionResponseSchema.parse(parsedJson);
@@ -386,12 +402,105 @@ export async function parseUploadedCvToTemplate(params: {
   };
 }
 
+/**
+ * Tightens the longest modified CV blocks (summary / bullets) by ~15-20% characters
+ * to recover from a >1 page layout overflow while preserving authentic metrics and clarity.
+ */
+export async function shortenSurgicalReplacements(params: {
+  replacements: TailoringDiffMap;
+  allowedBlocks: TailorableBlock[];
+  targetReductionRatio?: number;
+  strictMaxOverride?: Record<string, number>;
+}): Promise<TailoringDiffMap> {
+  const ai = getGeminiClient();
+  const reductionRatio = params.targetReductionRatio ?? 0.82;
+  const blockByNorm = new Map(
+    params.allowedBlocks.map((b) => [normalizeForMatch(b.originalText), b]),
+  );
+
+  const candidates = Object.entries(params.replacements)
+    .map(([origNorm, currentText]) => {
+      const block = blockByNorm.get(normalizeForMatch(origNorm));
+      const baseMax = params.strictMaxOverride?.[origNorm] ?? currentText.length;
+      const targetMax = Math.max(
+        40,
+        Math.min(
+          origNorm.length,
+          Math.floor(baseMax * reductionRatio),
+        ),
+      );
+      return {
+        origNorm: normalizeForMatch(origNorm),
+        currentText,
+        section: block?.section ?? 'bullet',
+        targetMax,
+      };
+    })
+    .filter((c) => c.section !== 'toolbox' || c.currentText.length > c.origNorm.length)
+    .sort((a, b) => b.currentText.length - a.currentText.length);
+
+  if (candidates.length === 0) {
+    return params.replacements;
+  }
+
+  const prompt = [
+    `You are tightening CV sentences so the Word document fits strictly on 1 page.`,
+    `For EACH item below, rewrite "current_text" to be AT OR BELOW "MAX_CHARS" (cut filler words cleanly while keeping complete sentences and ALL real metrics/technologies).`,
+    `IMPORTANT: Set "original_text" to the EXACT "ORIGINAL_KEY" string verbatim, and make "tailored_text" strictly <= MAX_CHARS characters.`,
+    ``,
+    ...candidates.map(
+      (c, idx) =>
+        `[${idx + 1}] MAX_CHARS=${c.targetMax}\nORIGINAL_KEY: ${c.origNorm}\nCURRENT_TEXT: ${c.currentText}`,
+    ),
+  ].join('\n');
+
+  const rawText = await generateJsonWithFallback(
+    ai,
+    prompt,
+    {
+      temperature: 0.1,
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          replacements: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                original_text: { type: Type.STRING },
+                tailored_text: { type: Type.STRING },
+              },
+              required: ['original_text', 'tailored_text'],
+            },
+          },
+        },
+        required: ['replacements'],
+      },
+    },
+    TAILORING_MODELS,
+    18000,
+  );
+
+  const parsed = shortenReplacementsResponseSchema.parse(parseJsonText(rawText));
+  const { replacements: sanitizedShortened } = sanitizeSurgicalReplacements(
+    parsed.replacements,
+    params.allowedBlocks,
+  );
+
+  return {
+    ...params.replacements,
+    ...sanitizedShortened,
+  };
+}
+
 export interface TailoredJobAnalysis {
   company: string;
   title: string;
   match_score: number;
   summary_hebrew: string;
   changes_made: string;
+  replacements: TailoringDiffMap;
   tailored_cv_json: TailoredCV;
 }
 
@@ -403,11 +512,140 @@ export async function analyzeAndTailorJob(
     title?: string;
     customPrompt?: string;
     masterTemplate?: TailoredCV;
+    tailorableBlocks?: TailorableBlock[];
   },
 ): Promise<TailoredJobAnalysis> {
   const ai = getGeminiClient();
   const master = hints?.masterTemplate ?? getDefaultMasterCvTemplate();
 
+  // Preferred Surgical Diff Path when tailorableBlocks from the original .docx are provided
+  if (hints?.tailorableBlocks && hints.tailorableBlocks.length > 0) {
+    const blocks = hints.tailorableBlocks;
+
+    const blocksList = blocks
+      .map(
+        (b, idx) =>
+          `[${idx + 1}] (${b.section}, MAX_CHARS=${b.maxLength}) ${b.originalText}`,
+      )
+      .join('\n');
+
+    const prompt = [
+      `You are an expert Data Analyst CV Editor performing SURGICAL IN-PLACE TEXT REPLACEMENT on an immutable Word (.docx) template.`,
+      ``,
+      `TAILORABLE CV TEXT BLOCKS (THE ONLY BLOCKS YOU MAY EDIT):`,
+      blocksList,
+      ``,
+      `STRICT RULES:`,
+      `1. MINIMAL DIFF: Only return entries in "replacements" for the few blocks (summary, 2-4 experience bullets, or toolbox keyword ordering) where job-specific wording meaningfully improves alignment. Leave unchanged blocks OUT of "replacements".`,
+      `2. EXACT ORIGINAL KEY: Each "original_text" in "replacements" MUST be copied character-for-character verbatim from the block text after MAX_CHARS=... above.`,
+      `3. STRICT LENGTH CONSTRAINT (MANDATORY): Every "tailored_text" MUST have character length <= MAX_CHARS (ideally 90%–100% of MAX_CHARS, NEVER 1 character longer!). Longer strings wrap onto new lines and break the 1-page Word layout.`,
+      `4. TOOLBOX PREFIXES: For toolbox blocks starting with "Category:", preserve the exact "Category:" prefix verbatim and only reorder/emphasize authentic tools from that row.`,
+      `5. IMMUTABLE ELEMENTS & ZERO FABRICATION: Headers, contact info, company names, roles, dates, and education are LOCKED outside these blocks. Never invent fake tools, companies, metrics, or placeholders.`,
+      `6. "match_score": integer 1-10 reflecting realistic fit.`,
+      `7. "summary_hebrew": Concise Hebrew summary (3-5 lines in natural Hebrew) explaining the role, team/domain, key technical requirements, and location/hybrid setup.`,
+      `8. "changes_made": Concise English bulleted list (using "- " prefix, 2-4 bullets) summarizing ONLY the exact surgical wording refinements made.`,
+      ``,
+      hints?.company ? `Hinted Company: ${hints.company}` : '',
+      hints?.title ? `Hinted Title: ${hints.title}` : '',
+      hints?.customPrompt
+        ? `Additional User Focus: ${hints.customPrompt} (emphasize relevant authentic skills while keeping length <= MAX_CHARS)`
+        : '',
+      `Job URL: ${jobUrl}`,
+      ``,
+      `Job Posting Markdown:`,
+      jobMarkdown,
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const rawText = await generateJsonWithFallback(
+      ai,
+      prompt,
+      {
+        temperature: 0.15,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            company: { type: Type.STRING },
+            title: { type: Type.STRING },
+            match_score: { type: Type.INTEGER },
+            summary_hebrew: { type: Type.STRING },
+            changes_made: { type: Type.STRING },
+            replacements: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  original_text: { type: Type.STRING },
+                  tailored_text: { type: Type.STRING },
+                },
+                required: ['original_text', 'tailored_text'],
+              },
+            },
+          },
+          required: [
+            'company',
+            'title',
+            'match_score',
+            'summary_hebrew',
+            'changes_made',
+            'replacements',
+          ],
+        },
+      },
+      TAILORING_MODELS,
+      22000,
+    );
+
+    const validated = surgicalJobAnalysisResponseSchema.parse(
+      parseJsonText(rawText),
+    );
+
+    let { replacements, droppedTooLong } = sanitizeSurgicalReplacements(
+      validated.replacements,
+      blocks,
+    );
+
+    // If Gemini exceeded character budget on any block, ask it once to tighten those entries under original length
+    if (droppedTooLong.length > 0) {
+      const overMap: TailoringDiffMap = {};
+      const maxMap: Record<string, number> = {};
+      for (const item of droppedTooLong) {
+        overMap[item.original_text] = item.tailored_text;
+        maxMap[item.original_text] = item.original_text.length;
+      }
+      const tightened = await shortenSurgicalReplacements({
+        replacements: overMap,
+        allowedBlocks: blocks,
+        targetReductionRatio: 0.85,
+        strictMaxOverride: maxMap,
+      }).catch(() => ({}) as TailoringDiffMap);
+
+      for (const [k, v] of Object.entries(tightened)) {
+        if (v.length <= k.length && !replacements[k]) {
+          replacements[k] = v;
+        }
+      }
+    }
+
+    const tailoredCv = sanitizeTailoredCV(
+      applyReplacementsToStructuredCv(master, replacements),
+      master,
+    );
+
+    return {
+      company: validated.company,
+      title: validated.title,
+      match_score: validated.match_score,
+      summary_hebrew: validated.summary_hebrew,
+      changes_made: validated.changes_made,
+      replacements,
+      tailored_cv_json: tailoredCv,
+    };
+  }
+
+  // Fallback legacy structured-JSON path (only if no tailorableBlocks provided)
   const masterProfileText = [
     `Name: ${master.name || MASTER_CV.name}`,
     `Title: ${master.title || MASTER_CV.title}`,
@@ -438,22 +676,13 @@ export async function analyzeAndTailorJob(
     masterProfileText,
     ``,
     `LIGHT-TOUCH TAILORING RULES (STRICT):`,
-    `1. PRESERVE STRUCTURE & WORDING: Keep at least 75–85% of the Master CV's exact wording verbatim. Keep the exact same ${master.experience.length} roles, exact company names, exact dates, exact bullet counts per role, exact education, and exact extra sections.`,
-    `2. SURGICAL SKILL ALIGNMENT ONLY: Make only minimal, targeted keyword adjustments in "summary" and at most 1–2 bullets per role to highlight required skills from the job description. Keep edited bullets roughly the SAME character length (±10%) as the original Master CV bullets so the original 1-page Word template never overflows!`,
-    `3. ZERO FABRICATION: NEVER invent fake companies, roles, degrees, dates, metrics, or tools not present in the Master CV. In "toolbox", keep all authentic tools and simply reorder items so job-relevant skills appear first.`,
-    `4. "match_score": integer 1-10 reflecting realistic fit.`,
-    `5. "summary_hebrew": Concise Hebrew summary (3-5 lines in natural Hebrew) explaining the role, team/domain, key technical requirements, and location/hybrid setup.`,
-    `6. "changes_made": Concise English bulleted list (using "- " prefix, 2-4 bullets) stating ONLY the minimal surgical edits made to align with the job.`,
-    `7. CHARACTER LIMITS (SO PDF STAYS STRICTLY 1 PAGE):`,
-    `   - summary: max ${CV_LIMITS.SUMMARY_MAX} chars`,
-    `   - each bullet: max ${CV_LIMITS.BULLET_MAX} chars`,
-    `   - each toolbox row ("category: items"): max ${CV_LIMITS.TOOLBOX_LINE_MAX} chars`,
+    `1. Keep at least 80% of the Master CV verbatim. Keep the exact same ${master.experience.length} roles, exact company names, exact dates, exact bullet counts per role, exact education.`,
+    `2. Every tailored string MUST be <= its original character length.`,
+    `3. ZERO FABRICATION.`,
     ``,
     hints?.company ? `Hinted Company: ${hints.company}` : '',
     hints?.title ? `Hinted Title: ${hints.title}` : '',
-    hints?.customPrompt
-      ? `Additional User Focus: ${hints.customPrompt} (emphasize relevant authentic skills while preserving the template)`
-      : '',
+    hints?.customPrompt ? `Additional User Focus: ${hints.customPrompt}` : '',
     `Job URL: ${jobUrl}`,
     ``,
     `Job Posting Markdown:`,
@@ -462,69 +691,69 @@ export async function analyzeAndTailorJob(
     .filter(Boolean)
     .join('\n');
 
-  const rawText = await generateJsonWithFallback(ai, prompt, {
-    temperature: 0.15,
-    responseMimeType: 'application/json',
-    responseSchema: {
-      type: Type.OBJECT,
-      properties: {
-        company: { type: Type.STRING },
-        title: { type: Type.STRING },
-        match_score: { type: Type.INTEGER },
-        summary_hebrew: { type: Type.STRING },
-        changes_made: { type: Type.STRING },
-        tailored_cv_json: {
-          type: Type.OBJECT,
-          properties: {
-            summary: { type: Type.STRING },
-            experience: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  role: { type: Type.STRING },
-                  company: { type: Type.STRING },
-                  period: { type: Type.STRING },
-                  bullets: {
-                    type: Type.ARRAY,
+  const rawText = await generateJsonWithFallback(
+    ai,
+    prompt,
+    {
+      temperature: 0.15,
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          company: { type: Type.STRING },
+          title: { type: Type.STRING },
+          match_score: { type: Type.INTEGER },
+          summary_hebrew: { type: Type.STRING },
+          changes_made: { type: Type.STRING },
+          tailored_cv_json: {
+            type: Type.OBJECT,
+            properties: {
+              summary: { type: Type.STRING },
+              experience: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    role: { type: Type.STRING },
+                    company: { type: Type.STRING },
+                    period: { type: Type.STRING },
+                    bullets: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  },
+                  required: ['role', 'company', 'period', 'bullets'],
+                },
+              },
+              toolbox: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    category: { type: Type.STRING },
                     items: { type: Type.STRING },
                   },
+                  required: ['category', 'items'],
                 },
-                required: ['role', 'company', 'period', 'bullets'],
               },
+              education: { type: Type.ARRAY, items: { type: Type.STRING } },
             },
-            toolbox: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  category: { type: Type.STRING },
-                  items: { type: Type.STRING },
-                },
-                required: ['category', 'items'],
-              },
-            },
-            education: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
+            required: ['summary', 'experience', 'toolbox', 'education'],
           },
-          required: ['summary', 'experience', 'toolbox', 'education'],
         },
+        required: [
+          'company',
+          'title',
+          'match_score',
+          'summary_hebrew',
+          'changes_made',
+          'tailored_cv_json',
+        ],
       },
-      required: [
-        'company',
-        'title',
-        'match_score',
-        'summary_hebrew',
-        'changes_made',
-        'tailored_cv_json',
-      ],
     },
-  }, TAILORING_MODELS, 22000);
+    TAILORING_MODELS,
+    22000,
+  );
 
-  const parsedJson = parseJsonText(rawText);
-  const validated = jobAnalysisResponseSchema.parse(parsedJson);
+  const validated = jobAnalysisResponseSchema.parse(parseJsonText(rawText));
+  const sanitized = sanitizeTailoredCV(validated.tailored_cv_json, master);
 
   return {
     company: validated.company,
@@ -532,6 +761,7 @@ export async function analyzeAndTailorJob(
     match_score: validated.match_score,
     summary_hebrew: validated.summary_hebrew,
     changes_made: validated.changes_made,
-    tailored_cv_json: sanitizeTailoredCV(validated.tailored_cv_json, master),
+    replacements: {},
+    tailored_cv_json: sanitized,
   };
 }

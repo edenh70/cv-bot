@@ -1,5 +1,10 @@
 import JSZip from 'jszip';
-import type { CvLayoutMeta, TailoredCV } from './types';
+import type {
+  CvLayoutMeta,
+  TailorableBlock,
+  TailoredCV,
+  TailoringDiffMap,
+} from './types';
 
 export interface DocxLayoutMeta extends CvLayoutMeta {
   sectionOrder: Array<'experience' | 'education' | 'toolbox'>;
@@ -7,6 +12,9 @@ export interface DocxLayoutMeta extends CvLayoutMeta {
   accentColor?: string;
   inlineHeaderContact?: boolean;
 }
+
+const SKIP_PARAGRAPH_TAG_REGEX =
+  /<w:hyperlink\b|<w:drawing\b|<w:pict\b|<mc:AlternateContent\b/;
 
 function decodeXmlEntities(input: string): string {
   return input
@@ -26,13 +34,14 @@ function escapeXml(input: string): string {
     .replace(/'/g, '&apos;');
 }
 
-function normalizeForMatch(text: string): string {
-  return text.replace(/\s+/g, ' ').trim();
+export function normalizeForMatch(text: string): string {
+  return text.replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function extractParagraphPlainText(pXml: string): string {
   const parts: string[] = [];
-  const tokenRegex = /<w:t\b[^>]*>([\s\S]*?)<\/w:t>|<w:tab\b[^>]*\/>|<w:br\b[^>]*\/>/g;
+  const tokenRegex =
+    /<w:t\b[^>]*>([\s\S]*?)<\/w:t>|<w:tab\b[^>]*\/>|<w:br\b[^>]*\/>/g;
   let match: RegExpExecArray | null;
   while ((match = tokenRegex.exec(pXml)) !== null) {
     if (match[1] !== undefined) {
@@ -75,9 +84,42 @@ function isValidAccentHex(hex: string): boolean {
   const r = parseInt(upper.slice(0, 2), 16);
   const g = parseInt(upper.slice(2, 4), 16);
   const b = parseInt(upper.slice(4, 6), 16);
-  // Skip near-neutral grays/blacks so we pick the actual accent color (e.g. navy/blue)
   const spread = Math.max(r, g, b) - Math.min(r, g, b);
   return spread >= 20;
+}
+
+export async function validateDocxBinary(
+  buffer: Buffer,
+): Promise<{ valid: boolean; errors: string[] }> {
+  const errors: string[] = [];
+  if (!buffer || buffer.length < 4) {
+    errors.push('DOCX buffer is empty or truncated.');
+    return { valid: false, errors };
+  }
+
+  if (buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
+    errors.push('DOCX buffer does not start with valid PK zip signature.');
+    return { valid: false, errors };
+  }
+
+  try {
+    const zip = await JSZip.loadAsync(buffer);
+    const docFile = zip.file('word/document.xml');
+    if (!docFile) {
+      errors.push('Invalid .docx archive: missing word/document.xml.');
+    } else {
+      const xml = await docFile.async('string');
+      if (!xml.includes('<w:body')) {
+        errors.push('Invalid word/document.xml: missing <w:body>.');
+      }
+    }
+  } catch (err) {
+    errors.push(
+      `Corrupt .docx archive: ${err instanceof Error ? err.message : 'Unable to unzip.'}`,
+    );
+  }
+
+  return { valid: errors.length === 0, errors };
 }
 
 export async function extractDocxInfo(
@@ -102,11 +144,15 @@ export async function extractDocxInfo(
     const upper = p.toUpperCase();
     if (/^(PROFESSIONAL\s+SUMMARY|SUMMARY|PROFILE)$/.test(upper)) {
       hasSummaryHeading = true;
-    } else if (/^(PROFESSIONAL\s+EXPERIENCE|WORK\s+EXPERIENCE|EXPERIENCE)$/.test(upper)) {
+    } else if (
+      /^(PROFESSIONAL\s+EXPERIENCE|WORK\s+EXPERIENCE|EXPERIENCE)$/.test(upper)
+    ) {
       if (!sectionOrder.includes('experience')) sectionOrder.push('experience');
     } else if (/^(EDUCATION|EDUCATION\s*&\s*TRAINING)$/.test(upper)) {
       if (!sectionOrder.includes('education')) sectionOrder.push('education');
-    } else if (/^(TECHNICAL\s+TOOLBOX|TECHNICAL\s+SKILLS|SKILLS|TOOLBOX)$/.test(upper)) {
+    } else if (
+      /^(TECHNICAL\s+TOOLBOX|TECHNICAL\s+SKILLS|SKILLS|TOOLBOX)$/.test(upper)
+    ) {
       if (!sectionOrder.includes('toolbox')) sectionOrder.push('toolbox');
     }
   }
@@ -141,46 +187,175 @@ export async function extractDocxInfo(
   };
 }
 
+function paragraphMatchesTarget(paragraphText: string, targetText: string): boolean {
+  const pNorm = normalizeForMatch(paragraphText);
+  const tNorm = normalizeForMatch(targetText);
+  if (!pNorm || !tNorm) return false;
+  if (pNorm === tNorm) return true;
+  if (pNorm.length >= 45 && tNorm.length >= 45) {
+    const prefixLen = Math.min(45, pNorm.length, tNorm.length);
+    return (
+      pNorm.startsWith(tNorm.slice(0, prefixLen)) ||
+      tNorm.startsWith(pNorm.slice(0, prefixLen))
+    );
+  }
+  return false;
+}
+
+/**
+ * Extracts ONLY the exact tailorable XML paragraphs (summary, experience bullets,
+ * and toolbox lines) from `word/document.xml`, never headers, contact lines,
+ * hyperlinks, companies, dates, or education rows.
+ */
+export async function extractTailorableBlocksFromDocx(
+  originalBuffer: Buffer,
+  masterTemplate: TailoredCV,
+): Promise<TailorableBlock[]> {
+  const zip = await JSZip.loadAsync(originalBuffer);
+  const docFile = zip.file('word/document.xml');
+  if (!docFile) {
+    throw new Error('Invalid .docx file: word/document.xml not found.');
+  }
+
+  const xml = await docFile.async('string');
+  const pMatches = xml.match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) ?? [];
+  const xmlParagraphs: string[] = [];
+
+  for (const pXml of pMatches) {
+    if (SKIP_PARAGRAPH_TAG_REGEX.test(pXml)) continue;
+    const plain = extractParagraphPlainText(pXml);
+    if (plain.length > 0) {
+      xmlParagraphs.push(plain);
+    }
+  }
+
+  const usedIndices = new Set<number>();
+  const findXmlParagraph = (candidates: string[]): string | null => {
+    for (const candidate of candidates) {
+      const idx = xmlParagraphs.findIndex(
+        (pText, i) => !usedIndices.has(i) && paragraphMatchesTarget(pText, candidate),
+      );
+      if (idx !== -1) {
+        usedIndices.add(idx);
+        return xmlParagraphs[idx];
+      }
+    }
+    return null;
+  };
+
+  const blocks: TailorableBlock[] = [];
+
+  if (masterTemplate.summary.trim().length > 0) {
+    const exactSummary = findXmlParagraph([masterTemplate.summary]);
+    if (exactSummary) {
+      blocks.push({
+        id: 'summary',
+        section: 'summary',
+        originalText: exactSummary,
+        maxLength: exactSummary.length,
+      });
+    }
+  }
+
+  masterTemplate.experience.forEach((role, rIdx) => {
+    role.bullets.forEach((bullet, bIdx) => {
+      const exactBullet = findXmlParagraph([bullet]);
+      if (exactBullet) {
+        blocks.push({
+          id: `exp_${rIdx}_bullet_${bIdx}`,
+          section: 'bullet',
+          originalText: exactBullet,
+          maxLength: exactBullet.length,
+        });
+      }
+    });
+  });
+
+  masterTemplate.toolbox.forEach((tb, tIdx) => {
+    const fullRow = `${tb.category}: ${tb.items}`;
+    const exactToolbox = findXmlParagraph([fullRow, tb.items]);
+    if (exactToolbox) {
+      blocks.push({
+        id: `toolbox_${tIdx}`,
+        section: 'toolbox',
+        originalText: exactToolbox,
+        maxLength: exactToolbox.length,
+      });
+    }
+  });
+
+  return blocks;
+}
+
+/**
+ * Validates and sanitizes Gemini's surgical replacements against the allowed
+ * tailorable XML blocks. Strictly enforces `tailored_text.length <= original_text.length`
+ * and preserves `Category:` prefixes on toolbox rows.
+ */
+export function sanitizeSurgicalReplacements(
+  rawPairs: Array<{ original_text: string; tailored_text: string }>,
+  allowedBlocks: TailorableBlock[],
+): {
+  replacements: TailoringDiffMap;
+  droppedTooLong: Array<{ original_text: string; tailored_text: string }>;
+} {
+  const blockByNorm = new Map<string, TailorableBlock>();
+  for (const block of allowedBlocks) {
+    blockByNorm.set(normalizeForMatch(block.originalText), block);
+  }
+
+  const replacements: TailoringDiffMap = {};
+  const droppedTooLong: Array<{ original_text: string; tailored_text: string }> = [];
+
+  for (const pair of rawPairs) {
+    const origNorm = normalizeForMatch(pair.original_text ?? '');
+    let block = blockByNorm.get(origNorm);
+
+    if (!block && origNorm.length >= 45) {
+      block = allowedBlocks.find((b) =>
+        paragraphMatchesTarget(b.originalText, origNorm),
+      );
+    }
+    if (!block) continue;
+
+    const canonicalOriginal = normalizeForMatch(block.originalText);
+    let tailoredNorm = normalizeForMatch(pair.tailored_text ?? '');
+    if (!tailoredNorm || tailoredNorm === canonicalOriginal) continue;
+
+    // Guarantee exact "Category:" prefix stays untouched on toolbox entries
+    if (block.section === 'toolbox') {
+      const origColon = canonicalOriginal.indexOf(':');
+      if (origColon > 0 && origColon < 45) {
+        const expectedPrefix = canonicalOriginal.slice(0, origColon + 1);
+        if (!tailoredNorm.startsWith(expectedPrefix)) {
+          const tColon = tailoredNorm.indexOf(':');
+          const itemsPart =
+            tColon >= 0 && tColon < 45
+              ? tailoredNorm.slice(tColon + 1).trim()
+              : tailoredNorm;
+          tailoredNorm = `${expectedPrefix} ${itemsPart}`;
+        }
+      }
+    }
+
+    if (tailoredNorm.length > canonicalOriginal.length) {
+      droppedTooLong.push({
+        original_text: canonicalOriginal,
+        tailored_text: tailoredNorm,
+      });
+      continue;
+    }
+
+    replacements[canonicalOriginal] = tailoredNorm;
+  }
+
+  return { replacements, droppedTooLong };
+}
+
 interface TextReplacement {
   oldNorm: string;
   newText: string;
   used: boolean;
-}
-
-function buildSurgicalReplacements(
-  master: TailoredCV,
-  tailored: TailoredCV,
-): TextReplacement[] {
-  const list: TextReplacement[] = [];
-
-  const pushIfChanged = (oldStr: string | undefined, newStr: string | undefined) => {
-    const o = normalizeForMatch(oldStr ?? '');
-    const n = normalizeForMatch(newStr ?? '');
-    if (o && n && o !== n) {
-      list.push({ oldNorm: o, newText: n, used: false });
-    }
-  };
-
-  pushIfChanged(master.summary, tailored.summary);
-
-  master.experience.forEach((mRole, idx) => {
-    const tRole = tailored.experience[idx];
-    if (!tRole) return;
-    mRole.bullets.forEach((mBullet, bIdx) => {
-      pushIfChanged(mBullet, tRole.bullets[bIdx]);
-    });
-  });
-
-  master.toolbox.forEach((mCat, idx) => {
-    const tCat = tailored.toolbox[idx];
-    if (!tCat) return;
-    const oldFull = `${mCat.category}: ${mCat.items}`;
-    const newFull = `${tCat.category}: ${tCat.items}`;
-    pushIfChanged(oldFull, newFull);
-    pushIfChanged(mCat.items, tCat.items);
-  });
-
-  return list;
 }
 
 function findMatchingReplacement(
@@ -193,7 +368,6 @@ function findMatchingReplacement(
   const exact = replacements.find((r) => !r.used && r.oldNorm === norm);
   if (exact) return exact;
 
-  // Fallback prefix match (>= 45 chars) in case Word split punctuation or Master CV had slight whitespace diff
   if (norm.length >= 45) {
     const prefix = norm.slice(0, 45);
     return replacements.find(
@@ -231,11 +405,19 @@ function rebuildParagraphXml(pXml: string, newText: string): string {
   return `${openTag}${pPr}<w:r>${primaryRPr}<w:t xml:space="preserve">${escapeXml(newText)}</w:t></w:r></w:p>`;
 }
 
-export async function patchDocxWithTailoredCv(
+/**
+ * Patches ONLY matching paragraphs inside `word/document.xml` from `replacements`,
+ * leaving all untouched paragraphs, hyperlinks, styles, margins, and borders
+ * 100% byte-identical to the uploaded `.docx` template.
+ */
+export async function patchDocxWithReplacements(
   originalBuffer: Buffer,
-  masterTemplate: TailoredCV,
-  tailoredCv: TailoredCV,
-): Promise<Buffer> {
+  replacementsMap: TailoringDiffMap,
+): Promise<{
+  docxBuffer: Buffer;
+  appliedCount: number;
+  appliedMap: TailoringDiffMap;
+}> {
   const zip = await JSZip.loadAsync(originalBuffer);
   const docFile = zip.file('word/document.xml');
   if (!docFile) {
@@ -243,30 +425,127 @@ export async function patchDocxWithTailoredCv(
   }
 
   const xml = await docFile.async('string');
-  const replacements = buildSurgicalReplacements(masterTemplate, tailoredCv);
+  const queue: TextReplacement[] = Object.entries(replacementsMap)
+    .map(([oldStr, newStr]) => ({
+      oldNorm: normalizeForMatch(oldStr),
+      newText: normalizeForMatch(newStr),
+      used: false,
+    }))
+    .filter((item) => item.oldNorm && item.newText && item.oldNorm !== item.newText);
+
+  let appliedCount = 0;
+  const appliedMap: TailoringDiffMap = {};
 
   const patchedXml = xml.replace(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g, (pXml) => {
-    if (pXml.includes('<w:hyperlink')) {
+    if (SKIP_PARAGRAPH_TAG_REGEX.test(pXml)) {
       return pXml;
     }
     const plain = extractParagraphPlainText(pXml);
-    const match = findMatchingReplacement(plain, replacements);
+    const match = findMatchingReplacement(plain, queue);
     if (!match) {
       return pXml;
     }
     match.used = true;
+    appliedCount += 1;
+    appliedMap[match.oldNorm] = match.newText;
     return rebuildParagraphXml(pXml, match.newText);
   });
 
   zip.file('word/document.xml', patchedXml);
-  const output = await zip.generateAsync({
+  const docxBuffer = await zip.generateAsync({
     type: 'nodebuffer',
     compression: 'DEFLATE',
   });
 
-  if (output.length < 4 || output[0] !== 0x50 || output[1] !== 0x4b) {
-    throw new Error('Generated .docx archive failed ZIP signature check.');
+  const binaryCheck = await validateDocxBinary(docxBuffer);
+  if (!binaryCheck.valid) {
+    throw new Error(
+      `Generated .docx archive failed validation: ${binaryCheck.errors.join('; ')}`,
+    );
   }
 
-  return output;
+  return { docxBuffer, appliedCount, appliedMap };
+}
+
+/**
+ * Applies a surgical `{ original_text: tailored_text }` replacement map onto a
+ * structured Master CV copy while keeping companies, periods, education, and
+ * extra sections strictly untouched.
+ */
+export function applyReplacementsToStructuredCv(
+  master: TailoredCV,
+  replacementsMap: TailoringDiffMap,
+): TailoredCV {
+  const entries = Object.entries(replacementsMap).map(([k, v]) => ({
+    oldNorm: normalizeForMatch(k),
+    newText: normalizeForMatch(v),
+  }));
+
+  const lookup = (original: string): string | undefined => {
+    const match = entries.find((e) => paragraphMatchesTarget(e.oldNorm, original));
+    return match?.newText;
+  };
+
+  return {
+    ...structuredClone(master),
+    summary: lookup(master.summary) ?? master.summary,
+    experience: master.experience.map((role) => ({
+      ...role,
+      bullets: role.bullets.map((b) => lookup(b) ?? b),
+    })),
+    toolbox: master.toolbox.map((tb) => {
+      const fullRow = `${tb.category}: ${tb.items}`;
+      const hit = lookup(fullRow) ?? lookup(tb.items);
+      if (!hit) return { ...tb };
+      const prefix = `${tb.category}:`;
+      if (hit.startsWith(prefix)) {
+        return { category: tb.category, items: hit.slice(prefix.length).trim() };
+      }
+      const colonIdx = hit.indexOf(':');
+      if (colonIdx > 0 && colonIdx < 45) {
+        return {
+          category: tb.category,
+          items: hit.slice(colonIdx + 1).trim() || tb.items,
+        };
+      }
+      return { category: tb.category, items: hit };
+    }),
+  };
+}
+
+/**
+ * Backwards-compatible wrapper for pre-migration jobs that stored only
+ * `tailored_cv_json` without `tailoring_diffs_json`.
+ */
+export async function patchDocxWithTailoredCv(
+  originalBuffer: Buffer,
+  masterTemplate: TailoredCV,
+  tailoredCv: TailoredCV,
+): Promise<Buffer> {
+  const map: TailoringDiffMap = {};
+  const addIfChanged = (oldStr: string | undefined, newStr: string | undefined) => {
+    const o = normalizeForMatch(oldStr ?? '');
+    const n = normalizeForMatch(newStr ?? '');
+    if (o && n && o !== n) {
+      map[o] = n;
+    }
+  };
+
+  addIfChanged(masterTemplate.summary, tailoredCv.summary);
+  masterTemplate.experience.forEach((mRole, idx) => {
+    const tRole = tailoredCv.experience[idx];
+    if (!tRole) return;
+    mRole.bullets.forEach((mBullet, bIdx) => {
+      addIfChanged(mBullet, tRole.bullets[bIdx]);
+    });
+  });
+  masterTemplate.toolbox.forEach((mCat, idx) => {
+    const tCat = tailoredCv.toolbox[idx];
+    if (!tCat) return;
+    addIfChanged(`${mCat.category}: ${mCat.items}`, `${tCat.category}: ${tCat.items}`);
+    addIfChanged(mCat.items, tCat.items);
+  });
+
+  const { docxBuffer } = await patchDocxWithReplacements(originalBuffer, map);
+  return docxBuffer;
 }

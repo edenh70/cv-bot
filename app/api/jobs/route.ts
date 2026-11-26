@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { isAuthenticated } from '@/lib/auth';
-import { getSupabaseAdmin } from '@/lib/supabase';
+import { getSupabaseAdmin, JOB_PUBLIC_COLUMNS } from '@/lib/supabase';
 
 export const dynamic = 'force-dynamic';
 
@@ -14,12 +14,13 @@ export async function GET(request: Request) {
     const status = searchParams.get('status');
 
     const supabase = getSupabaseAdmin();
-    let query = supabase.from('jobs').select('*');
+    let query = supabase.from('jobs').select(JOB_PUBLIC_COLUMNS);
 
     if (
       status === 'pending_review' ||
       status === 'applied' ||
-      status === 'archived'
+      status === 'archived' ||
+      status === 'failed_validation'
     ) {
       query = query.eq('status', status);
     }

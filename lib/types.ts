@@ -1,4 +1,13 @@
-export type JobStatus = 'pending_review' | 'applied' | 'archived';
+export type JobStatus = 'pending_review' | 'applied' | 'archived' | 'failed_validation';
+
+export type TailoringDiffMap = Record<string, string>;
+
+export interface TailorableBlock {
+  id: string;
+  section: 'summary' | 'bullet' | 'toolbox';
+  originalText: string;
+  maxLength: number;
+}
 
 export interface TailoredCVExperienceItem {
   role: string;
@@ -74,7 +83,9 @@ export interface JobRecord {
   summary_hebrew: string;
   changes_made: string;
   tailored_cv_json: TailoredCV;
+  tailoring_diffs_json?: TailoringDiffMap | null;
   status: JobStatus;
+  validation_error?: string | null;
   applied_at: string | null;
   created_at: string;
 }

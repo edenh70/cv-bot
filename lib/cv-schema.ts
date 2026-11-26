@@ -83,6 +83,24 @@ export const tailoredCVRawSchema = z.object({
     .optional(),
 });
 
+export const surgicalReplacementItemSchema = z.object({
+  original_text: z.string().trim().min(1),
+  tailored_text: z.string().trim().min(1),
+});
+
+export const surgicalJobAnalysisResponseSchema = z.object({
+  company: z.string().trim().min(1).max(120),
+  title: z.string().trim().min(2).max(160),
+  match_score: z.coerce.number().int().min(1).max(10),
+  summary_hebrew: z.string().trim().min(5).max(1500),
+  changes_made: z.string().trim().min(5).max(2000),
+  replacements: z.array(surgicalReplacementItemSchema).default([]),
+});
+
+export const shortenReplacementsResponseSchema = z.object({
+  replacements: z.array(surgicalReplacementItemSchema).default([]),
+});
+
 export const jobAnalysisResponseSchema = z.object({
   company: z.string().trim().min(1).max(120),
   title: z.string().trim().min(2).max(160),

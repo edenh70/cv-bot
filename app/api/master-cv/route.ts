@@ -1,6 +1,15 @@
 import { NextResponse } from 'next/server';
 import { isAuthenticated } from '@/lib/auth';
-import { CvValidationError, validateAndRenderCv } from '@/lib/cv-validator';
+import {
+  CvValidationError,
+  validatePdfBinary,
+  validateTailoredCvContent,
+} from '@/lib/cv-validator';
+import { validateDocxBinary } from '@/lib/docx-template';
+import {
+  convertDocxToPdf,
+  isPdfConverterConfigured,
+} from '@/lib/docx-to-pdf';
 import { parseUploadedCvToTemplate } from '@/lib/gemini';
 import {
   deleteMasterCvProfile,
@@ -25,6 +34,7 @@ export async function GET() {
     return NextResponse.json({
       hasCustomCv: Boolean(profile),
       hasOriginalDocx: Boolean(profile?.original_file_base64),
+      pdfConverterConfigured: isPdfConverterConfigured(),
       profile: toPublicMasterCvProfile(profile),
       template,
     });
@@ -48,7 +58,7 @@ export async function POST(request: Request) {
 
     if (!(entry instanceof File)) {
       return NextResponse.json(
-        { error: 'Please select a .pdf, .docx, or .txt CV file.' },
+        { error: 'Please select your .docx CV file.' },
         { status: 400 },
       );
     }
@@ -61,43 +71,72 @@ export async function POST(request: Request) {
     }
 
     const filename = entry.name || 'resume.docx';
-    const mimeType = entry.type || '';
+    const mimeType =
+      entry.type ||
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
     const isDocx =
       filename.toLowerCase().endsWith('.docx') ||
       mimeType ===
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
+    if (!isDocx) {
+      return NextResponse.json(
+        {
+          error:
+            'Please upload a Word (.docx) file so the bot can preserve 100% of your exact layout and typography.',
+        },
+        { status: 400 },
+      );
+    }
+
     const buffer = Buffer.from(await entry.arrayBuffer());
+    const docxCheck = await validateDocxBinary(buffer);
+    if (!docxCheck.valid) {
+      return NextResponse.json(
+        { error: docxCheck.errors.join(' ') },
+        { status: 400 },
+      );
+    }
+
     const parsed = await parseUploadedCvToTemplate({
       filename,
       mimeType,
       buffer,
     });
 
-    const rendered = await validateAndRenderCv(parsed.template, undefined, {
-      preserveUploadedShape: true,
-    });
+    const contentCheck = validateTailoredCvContent(parsed.template);
+    if (!contentCheck.valid) {
+      throw new CvValidationError(contentCheck.errors);
+    }
+
+    let pageCount: number | null = null;
+    let pdfVerified = false;
+    if (isPdfConverterConfigured()) {
+      const pdfBuf = await convertDocxToPdf(buffer, filename);
+      const pdfCheck = await validatePdfBinary(pdfBuf);
+      if (!pdfCheck.valid) {
+        throw new CvValidationError(pdfCheck.errors);
+      }
+      pageCount = pdfCheck.pageCount;
+      pdfVerified = true;
+    }
 
     const profile = await saveMasterCvProfile({
       filename,
       rawText: parsed.rawText,
-      structured: rendered.cv,
-      originalFileBase64: isDocx ? buffer.toString('base64') : null,
-      originalMimeType: isDocx
-        ? mimeType ||
-          'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        : null,
+      structured: parsed.template,
+      originalFileBase64: buffer.toString('base64'),
+      originalMimeType: mimeType,
     });
 
     return NextResponse.json(
       {
         hasCustomCv: true,
         hasOriginalDocx: Boolean(profile.original_file_base64),
+        pdfVerified,
+        pageCount,
         profile: toPublicMasterCvProfile(profile),
         template: profile.structured_json,
-        pageCount: rendered.pageCount,
-        byteLength: rendered.byteLength,
-        density: rendered.density,
       },
       { status: 201 },
     );

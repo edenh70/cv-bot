@@ -225,7 +225,13 @@ export function DashboardShell() {
     }
   }
 
-  const pendingJobs = jobs.filter((j) => j.status === 'pending_review');
+  const pendingJobs = jobs.filter(
+    (j) => j.status === 'pending_review' || j.status === 'failed_validation',
+  );
+  const failedCount = pendingJobs.filter(
+    (j) => j.status === 'failed_validation',
+  ).length;
+  const readyCount = pendingJobs.length - failedCount;
   const appliedJobs = jobs
     .filter((j) => j.status === 'applied')
     .sort((a, b) => {
@@ -401,7 +407,8 @@ export function DashboardShell() {
 
                 <div className="flex items-center justify-between">
                   <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                    Pending Review ({pendingJobs.length})
+                    Pending Review ({readyCount}
+                    {failedCount > 0 ? ` · ${failedCount} Blocked` : ''})
                   </h2>
                   <button
                     type="button"

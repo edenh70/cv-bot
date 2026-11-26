@@ -1,9 +1,10 @@
-import { validateAndRenderCv } from './cv-validator';
+import { buildAndValidateTemplateCv } from './cv-validator';
+import { extractTailorableBlocksFromDocx } from './docx-template';
 import { analyzeAndTailorJob, extractMatchingJobs } from './gemini';
 import { syncSourcesFromGoogleSheet } from './google-sheet';
 import { normalizeAndValidateUrl, scrapeUrlWithJina } from './jina';
 import { getActiveMasterCv } from './master-cv-store';
-import { getSupabaseAdmin } from './supabase';
+import { getSupabaseAdmin, JOB_PUBLIC_COLUMNS } from './supabase';
 import type { JobRecord, ScanResultSummary, SourceRecord, TailoredCV } from './types';
 
 interface PendingCandidate {
@@ -67,6 +68,7 @@ export async function analyzeSingleJobUrl(
     titleHint?: string;
     customPrompt?: string;
     masterTemplate?: TailoredCV;
+    originalDocxBuffer?: Buffer;
   },
 ): Promise<{ job: JobRecord; alreadyExisted: boolean }> {
   const url = normalizeAndValidateUrl(rawUrl);
@@ -74,7 +76,7 @@ export async function analyzeSingleJobUrl(
 
   const { data: existing, error: lookupError } = await supabase
     .from('jobs')
-    .select('*')
+    .select(JOB_PUBLIC_COLUMNS)
     .eq('url', url)
     .maybeSingle();
 
@@ -86,49 +88,111 @@ export async function analyzeSingleJobUrl(
     return { job: existing as JobRecord, alreadyExisted: true };
   }
 
-  const masterTemplate =
-    options?.masterTemplate ?? (await getActiveMasterCv()).template;
+  let masterTemplate = options?.masterTemplate;
+  let originalDocxBuffer = options?.originalDocxBuffer;
+
+  if (!masterTemplate || !originalDocxBuffer) {
+    const active = await getActiveMasterCv();
+    masterTemplate = masterTemplate ?? active.template;
+    if (!originalDocxBuffer && active.profile?.original_file_base64) {
+      originalDocxBuffer = Buffer.from(active.profile.original_file_base64, 'base64');
+    }
+  }
+
+  if (!originalDocxBuffer) {
+    throw new Error(
+      'Upload your .docx Master CV template in the Add & Sources tab first so the bot can edit your exact CV in-place.',
+    );
+  }
+
+  const allowedBlocks = await extractTailorableBlocksFromDocx(
+    originalDocxBuffer,
+    masterTemplate,
+  );
+  if (allowedBlocks.length === 0) {
+    throw new Error(
+      'Could not match tailorable sections inside the uploaded .docx XML. Re-upload your .docx CV in Add & Sources.',
+    );
+  }
+
   const markdown = await scrapeUrlWithJina(url);
   const analysis = await analyzeAndTailorJob(url, markdown, {
     company: options?.companyHint,
     title: options?.titleHint,
     customPrompt: options?.customPrompt,
     masterTemplate,
+    tailorableBlocks: allowedBlocks,
   });
 
-  // Fail-safe guardrail: validate content AND verify 1-page PDF renders cleanly before storing
-  const validated = await validateAndRenderCv(
-    analysis.tailored_cv_json,
-    {
+  const built = await buildAndValidateTemplateCv({
+    originalDocxBuffer,
+    masterTemplate,
+    allowedBlocks,
+    replacements: analysis.replacements,
+    meta: {
       match_score: analysis.match_score,
       summary_hebrew: analysis.summary_hebrew,
       changes_made: analysis.changes_made,
     },
-    { masterTemplate },
-  );
+  });
+
+  const insertPayload: {
+    source_id: string | null;
+    company: string;
+    title: string;
+    url: string;
+    match_score: number;
+    summary_hebrew: string;
+    changes_made: string;
+    tailored_cv_json: TailoredCV;
+    tailoring_diffs_json: Record<string, string>;
+    tailored_docx_base64: string | null;
+    tailored_pdf_base64: string | null;
+    status: 'pending_review' | 'failed_validation';
+    validation_error: string | null;
+  } = built.ok
+    ? {
+        source_id: options?.sourceId ?? null,
+        company: analysis.company,
+        title: analysis.title,
+        url,
+        match_score: analysis.match_score,
+        summary_hebrew: analysis.summary_hebrew,
+        changes_made: analysis.changes_made,
+        tailored_cv_json: built.cv,
+        tailoring_diffs_json: built.replacements,
+        tailored_docx_base64: built.docxBuffer.toString('base64'),
+        tailored_pdf_base64: built.pdfBuffer.toString('base64'),
+        status: 'pending_review' as const,
+        validation_error: null,
+      }
+    : {
+        source_id: options?.sourceId ?? null,
+        company: analysis.company,
+        title: analysis.title,
+        url,
+        match_score: analysis.match_score,
+        summary_hebrew: analysis.summary_hebrew,
+        changes_made: analysis.changes_made,
+        tailored_cv_json: built.cv,
+        tailoring_diffs_json: built.replacements,
+        tailored_docx_base64: null,
+        tailored_pdf_base64: null,
+        status: 'failed_validation' as const,
+        validation_error: built.validationError,
+      };
 
   const { data: inserted, error: insertError } = await supabase
     .from('jobs')
-    .insert({
-      source_id: options?.sourceId ?? null,
-      company: analysis.company,
-      title: analysis.title,
-      url,
-      match_score: analysis.match_score,
-      summary_hebrew: analysis.summary_hebrew,
-      changes_made: analysis.changes_made,
-      tailored_cv_json: validated.cv,
-      status: 'pending_review',
-    })
-    .select('*')
+    .insert(insertPayload)
+    .select(JOB_PUBLIC_COLUMNS)
     .single();
 
   if (insertError) {
-    // Handle race condition if another process inserted the same URL concurrently
     if (insertError.code === '23505') {
       const { data: raced } = await supabase
         .from('jobs')
-        .select('*')
+        .select(JOB_PUBLIC_COLUMNS)
         .eq('url', url)
         .single();
       if (raced) {
@@ -276,7 +340,11 @@ export async function runDailyScan(
   }
 
   if (toProcess.length > 0) {
-    const { template: activeMasterTemplate } = await getActiveMasterCv();
+    const { template: activeMasterTemplate, profile } = await getActiveMasterCv();
+    const originalDocxBuffer = profile?.original_file_base64
+      ? Buffer.from(profile.original_file_base64, 'base64')
+      : undefined;
+
     const settled = await Promise.allSettled(
       toProcess.map((candidate) =>
         analyzeSingleJobUrl(candidate.url, {
@@ -285,6 +353,7 @@ export async function runDailyScan(
           titleHint: candidate.title,
           customPrompt,
           masterTemplate: activeMasterTemplate,
+          originalDocxBuffer,
         }),
       ),
     );

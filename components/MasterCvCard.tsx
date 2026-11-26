@@ -63,8 +63,12 @@ export function MasterCvCard({
         return;
       }
 
+      const pageMsg =
+        typeof data.pageCount === 'number'
+          ? `${data.pageCount}-page PDF verified, `
+          : '';
       setSuccessMsg(
-        `Saved "${file.name}" (${data.pageCount}-page verified${data.hasOriginalDocx ? ', exact Word template preserved' : ''}).`,
+        `Saved "${file.name}" (${pageMsg}exact Word template preserved).`,
       );
       onUpdated({
         hasCustomCv: true,
@@ -157,12 +161,12 @@ export function MasterCvCard({
           ) : (
             <>
               <Upload className="h-4 w-4 shrink-0" />
-              <span>{hasCustomCv ? 'Replace My CV' : 'Upload My CV (.pdf / .docx)'}</span>
+              <span>{hasCustomCv ? 'Replace My .docx CV' : 'Upload My CV (.docx)'}</span>
             </>
           )}
           <input
             type="file"
-            accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+            accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             disabled={uploading}
             onChange={handleFileChange}
             className="hidden"

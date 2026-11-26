@@ -12,6 +12,7 @@ import {
   Sparkles,
   Loader2,
   RefreshCw,
+  AlertTriangle,
 } from 'lucide-react';
 import type { JobRecord, JobStatus } from '@/lib/types';
 
@@ -45,7 +46,6 @@ function formatShortDate(iso: string): string {
 
 export function JobCard({
   job,
-  hasOriginalDocx = false,
   onStatusChange,
   onJobUpdated,
 }: JobCardProps) {
@@ -53,6 +53,8 @@ export function JobCard({
   const [busyStatus, setBusyStatus] = useState<JobStatus | null>(null);
   const [retailoring, setRetailoring] = useState(false);
   const [retailorError, setRetailorError] = useState<string | null>(null);
+
+  const isFailedValidation = job.status === 'failed_validation';
 
   async function triggerStatus(status: JobStatus) {
     if (busyStatus) return;
@@ -93,16 +95,28 @@ export function JobCard({
     .filter(Boolean);
 
   return (
-    <article className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition dark:border-slate-800 dark:bg-slate-900/90">
+    <article
+      className={`rounded-2xl border bg-white p-4 shadow-sm transition dark:bg-slate-900/90 ${
+        isFailedValidation
+          ? 'border-rose-300 dark:border-rose-900/70'
+          : 'border-slate-200 dark:border-slate-800'
+      }`}
+    >
       {/* Header: Company, Title & Match Score */}
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+          <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
             <span className="truncate font-semibold text-[#003366] dark:text-sky-400">
               {job.company}
             </span>
             <span>&middot;</span>
             <span>{formatShortDate(job.created_at)}</span>
+            {isFailedValidation && (
+              <span className="inline-flex items-center gap-1 rounded-md bg-rose-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-rose-800 dark:bg-rose-950/70 dark:text-rose-300">
+                <AlertTriangle className="h-3 w-3" />
+                Failed Validation
+              </span>
+            )}
           </div>
           <h2 className="mt-1 text-base font-bold leading-snug text-slate-900 dark:text-white">
             {job.title}
@@ -121,6 +135,18 @@ export function JobCard({
           </div>
         </div>
       </div>
+
+      {/* Validation Error Banner (blocks CV downloads when > 1 page) */}
+      {isFailedValidation && (
+        <div className="mt-3 flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs font-medium text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div>
+            <span className="font-bold">Validation Failed:</span>{' '}
+            {job.validation_error || 'Exceeded 1 page'}. Downloads are blocked — tap
+            &ldquo;Re-tailor&rdquo; to retry with tighter wording.
+          </div>
+        </div>
+      )}
 
       {/* Hebrew Summary (RTL) */}
       <div
@@ -161,54 +187,41 @@ export function JobCard({
         )}
       </div>
 
-      {/* Action Buttons — Mobile Thumb-Friendly Grid */}
-      <div className="mt-4 grid grid-cols-2 gap-2">
-        {/* 1. Download .docx (exact original format) or Preview / Download PDF */}
-        <div className="flex gap-1.5">
-          {hasOriginalDocx ? (
-            <>
-              <a
-                href={`/api/cv/${job.id}?format=docx`}
-                className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#003366] px-2.5 text-xs font-semibold text-white transition hover:bg-[#004080] active:scale-[0.98] dark:bg-sky-600 dark:hover:bg-sky-500"
-              >
-                <Download className="h-4 w-4 shrink-0" />
-                <span>Download .docx</span>
-              </a>
-              <a
-                href={`/api/cv/${job.id}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                aria-label="Preview PDF"
-                title="Preview PDF"
-                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-700 transition hover:bg-slate-100 active:scale-[0.98] dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
-              >
-                <FileText className="h-4 w-4" />
-              </a>
-            </>
-          ) : (
-            <>
-              <a
-                href={`/api/cv/${job.id}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#003366] px-3 text-xs font-semibold text-white transition hover:bg-[#004080] active:scale-[0.98] dark:bg-sky-600 dark:hover:bg-sky-500"
-              >
-                <FileText className="h-4 w-4 shrink-0" />
-                <span>Preview PDF</span>
-              </a>
-              <a
-                href={`/api/cv/${job.id}?download=1`}
-                aria-label="Download PDF"
-                title="Download PDF"
-                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-700 transition hover:bg-slate-100 active:scale-[0.98] dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
-              >
-                <Download className="h-4 w-4" />
-              </a>
-            </>
-          )}
-        </div>
+      {/* Dual Format Export Row (blocked cleanly when failed_validation) */}
+      {!isFailedValidation && (
+        <div className="mt-4 grid grid-cols-[1fr_1fr_auto] gap-2">
+          <a
+            href={`/api/cv/${job.id}?format=pdf`}
+            className="flex h-11 items-center justify-center gap-1.5 rounded-xl bg-[#003366] px-3 text-xs font-semibold text-white transition hover:bg-[#004080] active:scale-[0.98] dark:bg-sky-600 dark:hover:bg-sky-500"
+          >
+            <Download className="h-4 w-4 shrink-0" />
+            <span>Download PDF</span>
+          </a>
 
-        {/* 2. Open Job Page */}
+          <a
+            href={`/api/cv/${job.id}?format=docx`}
+            className="flex h-11 items-center justify-center gap-1.5 rounded-xl border border-[#003366]/25 bg-sky-50 px-3 text-xs font-semibold text-[#003366] transition hover:bg-sky-100 active:scale-[0.98] dark:border-sky-700/60 dark:bg-sky-950/40 dark:text-sky-300 dark:hover:bg-sky-950"
+          >
+            <Download className="h-4 w-4 shrink-0" />
+            <span>Download Word (.docx)</span>
+          </a>
+
+          <a
+            href={`/api/cv/${job.id}?format=pdf&inline=1`}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Preview PDF"
+            title="Preview PDF"
+            className="flex h-11 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 active:scale-[0.98] dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+          >
+            <FileText className="h-4 w-4 shrink-0" />
+            <span className="hidden sm:inline">Preview PDF</span>
+          </a>
+        </div>
+      )}
+
+      {/* Job Workflow Actions */}
+      <div className={`${isFailedValidation ? 'mt-4' : 'mt-2'} grid grid-cols-2 gap-2`}>
         <a
           href={job.url}
           target="_blank"
@@ -219,29 +232,31 @@ export function JobCard({
           <span>Open Job Page</span>
         </a>
 
-        {/* 3. Mark as Applied */}
-        <button
-          type="button"
-          disabled={busyStatus !== null}
-          onClick={() => triggerStatus('applied')}
-          className="flex h-11 items-center justify-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100 active:scale-[0.98] disabled:opacity-60 dark:border-emerald-800/70 dark:bg-emerald-950/50 dark:text-emerald-300 dark:hover:bg-emerald-950"
-        >
-          {busyStatus === 'applied' ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <CheckCircle2 className="h-4 w-4 shrink-0" />
-          )}
-          <span>Mark as Applied</span>
-        </button>
-
-        {/* 4. Archive / Dismiss + Re-tailor */}
         <div className="flex gap-1.5">
+          {!isFailedValidation && (
+            <button
+              type="button"
+              disabled={busyStatus !== null}
+              onClick={() => triggerStatus('applied')}
+              className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-2.5 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100 active:scale-[0.98] disabled:opacity-60 dark:border-emerald-800/70 dark:bg-emerald-950/50 dark:text-emerald-300 dark:hover:bg-emerald-950"
+            >
+              {busyStatus === 'applied' ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <CheckCircle2 className="h-4 w-4 shrink-0" />
+              )}
+              <span>Applied</span>
+            </button>
+          )}
+
           <button
             type="button"
             disabled={retailoring || busyStatus !== null}
             onClick={handleRetailor}
             title="Re-tailor CV using current Master CV template"
-            className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-xl border border-sky-200 bg-sky-50 px-2.5 text-xs font-semibold text-[#003366] transition hover:bg-sky-100 active:scale-[0.98] disabled:opacity-60 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-300 dark:hover:bg-sky-950"
+            className={`flex h-11 items-center justify-center gap-1.5 rounded-xl border border-sky-200 bg-sky-50 px-2.5 text-xs font-semibold text-[#003366] transition hover:bg-sky-100 active:scale-[0.98] disabled:opacity-60 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-300 dark:hover:bg-sky-950 ${
+              isFailedValidation ? 'flex-1' : ''
+            }`}
           >
             <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${retailoring ? 'animate-spin' : ''}`} />
             <span>{retailoring ? 'Updating...' : 'Re-tailor'}</span>

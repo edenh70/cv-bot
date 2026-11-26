@@ -1,15 +1,18 @@
-import { renderCvPdfBuffer, type PdfDensity } from './cv-pdf';
+import { PDFDocument } from 'pdf-lib';
+import { CV_LIMITS, sanitizeTailoredCV } from './cv-schema';
 import {
-  CV_LIMITS,
-  sanitizeTailoredCV,
-  sanitizeUploadedMasterCv,
-  truncateClean,
-} from './cv-schema';
-import type { TailoredCV } from './types';
+  applyReplacementsToStructuredCv,
+  normalizeForMatch,
+  patchDocxWithReplacements,
+  validateDocxBinary,
+} from './docx-template';
+import { convertDocxToPdf, type DocxToPdfConverter } from './docx-to-pdf';
+import { shortenSurgicalReplacements } from './gemini';
+import type { TailorableBlock, TailoredCV, TailoringDiffMap } from './types';
 
 export const CV_PDF_BOUNDS = {
   MIN_BYTES: 2_500,
-  MAX_BYTES: 2 * 1024 * 1024,
+  MAX_BYTES: 5 * 1024 * 1024,
   REQUIRED_PAGES: 1,
 } as const;
 
@@ -17,7 +20,6 @@ export const LEAKAGE_PATTERN =
   /\[INSERT|TODO\b|FIXME\b|\bTBD\b|Lorem ipsum|As an AI|Here is your|```|\{\{|\}\}|\bundefined\b|\bNaN\b/i;
 
 const HEBREW_CHAR_PATTERN = /[\u0590-\u05FF]/;
-const DENSITY_ORDER: PdfDensity[] = ['normal', 'compact', 'tight', 'ultra'];
 
 export class CvValidationError extends Error {
   readonly reasons: string[];
@@ -47,13 +49,17 @@ export interface ValidatedCvMetadata {
   changes_made?: string;
 }
 
-export function countPdfPages(buffer: Buffer): number {
-  const pdfLatin1 = buffer.toString('latin1');
-  const matches = pdfLatin1.match(/\/Type\s*\/Page\b(?!s)/g);
-  return matches ? matches.length : 0;
+/**
+ * Counts actual PDF pages programmatically using `pdf-lib`.
+ */
+export async function countPdfPages(buffer: Buffer): Promise<number> {
+  const doc = await PDFDocument.load(buffer, { ignoreEncryption: true });
+  return doc.getPageCount();
 }
 
-export function validatePdfBinary(buffer: Buffer): PdfBinaryValidationResult {
+export async function validatePdfBinary(
+  buffer: Buffer,
+): Promise<PdfBinaryValidationResult> {
   const errors: string[] = [];
   const byteLength = buffer.length;
 
@@ -62,12 +68,9 @@ export function validatePdfBinary(buffer: Buffer): PdfBinaryValidationResult {
     return { valid: false, byteLength, pageCount: 0, errors };
   }
 
-  const pdfLatin1 = buffer.toString('latin1');
-  if (!pdfLatin1.startsWith('%PDF-')) {
+  const header = buffer.subarray(0, 8).toString('latin1');
+  if (!header.startsWith('%PDF-')) {
     errors.push('PDF buffer does not start with valid %PDF- magic header.');
-  }
-  if (!pdfLatin1.includes('%%EOF')) {
-    errors.push('PDF buffer is truncated (missing %%EOF trailer).');
   }
 
   if (byteLength < CV_PDF_BOUNDS.MIN_BYTES) {
@@ -81,10 +84,19 @@ export function validatePdfBinary(buffer: Buffer): PdfBinaryValidationResult {
     );
   }
 
-  const pageCount = countPdfPages(buffer);
-  if (pageCount !== CV_PDF_BOUNDS.REQUIRED_PAGES) {
+  let pageCount = 0;
+  try {
+    pageCount = await countPdfPages(buffer);
+    if (pageCount !== CV_PDF_BOUNDS.REQUIRED_PAGES) {
+      errors.push(
+        `Exceeded 1 page: PDF has ${pageCount} page(s), strictly required ${CV_PDF_BOUNDS.REQUIRED_PAGES}.`,
+      );
+    }
+  } catch (err) {
     errors.push(
-      `PDF page count must be strictly ${CV_PDF_BOUNDS.REQUIRED_PAGES}, got ${pageCount}.`,
+      `Failed to parse PDF structure with pdf-lib: ${
+        err instanceof Error ? err.message : 'Corrupt PDF'
+      }`,
     );
   }
 
@@ -94,6 +106,44 @@ export function validatePdfBinary(buffer: Buffer): PdfBinaryValidationResult {
     pageCount,
     errors,
   };
+}
+
+export function validateReplacementsAgainstRules(
+  replacements: TailoringDiffMap,
+  allowedBlocks: TailorableBlock[],
+): CvContentValidationResult {
+  const errors: string[] = [];
+  const blockByNorm = new Map(
+    allowedBlocks.map((b) => [normalizeForMatch(b.originalText), b]),
+  );
+
+  for (const [origKey, newVal] of Object.entries(replacements)) {
+    const origNorm = normalizeForMatch(origKey);
+    const valNorm = normalizeForMatch(newVal);
+    const block = blockByNorm.get(origNorm);
+
+    if (!block) {
+      errors.push(
+        `Attempted replacement on non-tailorable block: "${origNorm.slice(0, 60)}...".`,
+      );
+      continue;
+    }
+
+    if (valNorm.length > origNorm.length) {
+      errors.push(
+        `Replacement for ${block.id} (${valNorm.length} chars) exceeds original length (${origNorm.length} chars).`,
+      );
+    }
+
+    const leakageMatch = valNorm.match(LEAKAGE_PATTERN);
+    if (leakageMatch) {
+      errors.push(
+        `Disallowed placeholder or LLM leakage detected in replacement: "${leakageMatch[0]}".`,
+      );
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
 }
 
 export function validateTailoredCvContent(
@@ -222,106 +272,160 @@ export function validateTailoredCvContent(
   };
 }
 
-function trimCvSlightly(cv: TailoredCV, factor: number): TailoredCV {
-  return {
-    ...cv,
-    summary: cv.summary
-      ? truncateClean(cv.summary, Math.max(80, Math.floor(cv.summary.length * factor)))
-      : '',
-    experience: cv.experience.map((exp) => ({
-      ...exp,
-      bullets: exp.bullets.map((b) =>
-        truncateClean(b, Math.max(45, Math.floor(b.length * factor))),
-      ),
-    })),
-  };
-}
+export type BuildTemplateCvResult =
+  | {
+      ok: true;
+      status: 'pending_review';
+      validationError: null;
+      pageCount: 1;
+      byteLength: number;
+      docxBuffer: Buffer;
+      pdfBuffer: Buffer;
+      cv: TailoredCV;
+      replacements: TailoringDiffMap;
+    }
+  | {
+      ok: false;
+      status: 'failed_validation';
+      validationError: string;
+      pageCount: number;
+      cv: TailoredCV;
+      replacements: TailoringDiffMap;
+    };
 
-export async function validateAndRenderCv(
-  rawCv: TailoredCV,
-  meta?: ValidatedCvMetadata,
-  options?: {
-    masterTemplate?: TailoredCV;
-    preserveUploadedShape?: boolean;
-  },
-): Promise<{
-  cv: TailoredCV;
-  pdfBuffer: Buffer;
-  byteLength: number;
-  pageCount: number;
-  density: PdfDensity;
-}> {
-  const preserveUploadedShape = Boolean(options?.preserveUploadedShape);
-  let currentCv = preserveUploadedShape
-    ? sanitizeUploadedMasterCv(rawCv)
-    : sanitizeTailoredCV(rawCv, options?.masterTemplate);
-
-  const contentCheck = validateTailoredCvContent(
-    currentCv,
+/**
+ * End-to-end template-preserving CV builder & guardrail:
+ * 1. Validates replacement lengths (`<= original`) & zero LLM leakage.
+ * 2. Patches the original `.docx` XML in-place (`PK` check).
+ * 3. Converts that exact `.docx` to `.pdf` via the pixel-exact converter.
+ * 4. Checks page count programmatically with `pdf-lib`.
+ * 5. If `pageCount > 1`, triggers ONE automatic Gemini shortening pass (~15-20%)
+ *    on the longest modified bullets, re-patches, re-converts, and re-verifies.
+ * 6. If still `pageCount !== 1`, hard-blocks as `failed_validation` (`"Exceeded 1 page"`).
+ */
+export async function buildAndValidateTemplateCv(params: {
+  originalDocxBuffer: Buffer;
+  masterTemplate: TailoredCV;
+  allowedBlocks: TailorableBlock[];
+  replacements: TailoringDiffMap;
+  meta?: ValidatedCvMetadata;
+  convertDocxToPdfFn?: DocxToPdfConverter;
+  shortenReplacementsFn?: (current: TailoringDiffMap) => Promise<TailoringDiffMap>;
+}): Promise<BuildTemplateCvResult> {
+  const {
+    originalDocxBuffer,
+    masterTemplate,
+    allowedBlocks,
     meta,
-    preserveUploadedShape ? undefined : options?.masterTemplate,
+    convertDocxToPdfFn = convertDocxToPdf,
+  } = params;
+
+  const shortenFn =
+    params.shortenReplacementsFn ??
+    ((current: TailoringDiffMap) =>
+      shortenSurgicalReplacements({
+        replacements: current,
+        allowedBlocks,
+        targetReductionRatio: 0.82,
+      }));
+
+  let currentReplacements = { ...params.replacements };
+
+  const diffCheck = validateReplacementsAgainstRules(
+    currentReplacements,
+    allowedBlocks,
   );
+  if (!diffCheck.valid) {
+    throw new CvValidationError(diffCheck.errors);
+  }
+
+  let currentCv = sanitizeTailoredCV(
+    applyReplacementsToStructuredCv(masterTemplate, currentReplacements),
+    masterTemplate,
+  );
+
+  const contentCheck = validateTailoredCvContent(currentCv, meta, masterTemplate);
   if (!contentCheck.valid) {
     throw new CvValidationError(contentCheck.errors);
   }
 
-  // First try progressively tighter densities to preserve 100% of user's wording
-  let chosenDensity: PdfDensity = 'normal';
-  let pdfBuffer: Buffer = Buffer.alloc(0);
-  let binaryCheck: PdfBinaryValidationResult = {
-    valid: false,
-    byteLength: 0,
-    pageCount: 0,
-    errors: [],
-  };
+  const origDocxCheck = await validateDocxBinary(originalDocxBuffer);
+  if (!origDocxCheck.valid) {
+    throw new CvValidationError(origDocxCheck.errors);
+  }
 
-  for (const density of DENSITY_ORDER) {
-    chosenDensity = density;
-    pdfBuffer = await renderCvPdfBuffer(currentCv, {
-      density,
-      masterTemplate: options?.masterTemplate,
-      preserveUploadedShape: true,
-    });
-    binaryCheck = validatePdfBinary(pdfBuffer);
-    if (binaryCheck.valid) {
+  // Pass 1: patch original .docx -> convert to pixel-exact .pdf -> verify pageCount === 1
+  let { docxBuffer } = await patchDocxWithReplacements(
+    originalDocxBuffer,
+    currentReplacements,
+  );
+  let pdfBuffer: Buffer = await convertDocxToPdfFn(docxBuffer, 'cv_tailored.docx');
+  let pdfCheck = await validatePdfBinary(pdfBuffer);
+
+  if (pdfCheck.valid && pdfCheck.pageCount === 1) {
+    return {
+      ok: true,
+      status: 'pending_review',
+      validationError: null,
+      pageCount: 1,
+      byteLength: pdfCheck.byteLength,
+      docxBuffer,
+      pdfBuffer,
+      cv: currentCv,
+      replacements: currentReplacements,
+    };
+  }
+
+  // Pass 2 (Auto-Recovery Loop): shorten longest modified bullets by ~15-20% if > 1 page
+  if (pdfCheck.pageCount > CV_PDF_BOUNDS.REQUIRED_PAGES && Object.keys(currentReplacements).length > 0) {
+    currentReplacements = await shortenFn(currentReplacements);
+    const retryDiffCheck = validateReplacementsAgainstRules(
+      currentReplacements,
+      allowedBlocks,
+    );
+    if (!retryDiffCheck.valid) {
+      throw new CvValidationError(retryDiffCheck.errors);
+    }
+
+    currentCv = sanitizeTailoredCV(
+      applyReplacementsToStructuredCv(masterTemplate, currentReplacements),
+      masterTemplate,
+    );
+
+    const patchedRetry = await patchDocxWithReplacements(
+      originalDocxBuffer,
+      currentReplacements,
+    );
+    docxBuffer = patchedRetry.docxBuffer;
+    pdfBuffer = await convertDocxToPdfFn(docxBuffer, 'cv_tailored.docx');
+    pdfCheck = await validatePdfBinary(pdfBuffer);
+
+    if (pdfCheck.valid && pdfCheck.pageCount === 1) {
       return {
-        cv: currentCv,
+        ok: true,
+        status: 'pending_review',
+        validationError: null,
+        pageCount: 1,
+        byteLength: pdfCheck.byteLength,
+        docxBuffer,
         pdfBuffer,
-        byteLength: binaryCheck.byteLength,
-        pageCount: binaryCheck.pageCount,
-        density: chosenDensity,
+        cv: currentCv,
+        replacements: currentReplacements,
       };
     }
-    if (binaryCheck.pageCount <= CV_PDF_BOUNDS.REQUIRED_PAGES) {
-      break;
-    }
   }
 
-  // Only if 'ultra' density still overflows beyond 1 page, trim text gently up to 3 attempts
-  for (
-    let attempt = 0;
-    attempt < 3 && binaryCheck.pageCount > CV_PDF_BOUNDS.REQUIRED_PAGES;
-    attempt++
-  ) {
-    currentCv = trimCvSlightly(currentCv, 0.88);
-    pdfBuffer = await renderCvPdfBuffer(currentCv, {
-      density: 'ultra',
-      masterTemplate: options?.masterTemplate,
-      preserveUploadedShape: true,
-    });
-    binaryCheck = validatePdfBinary(pdfBuffer);
-    chosenDensity = 'ultra';
+  // Hard Block when PDF fails 1-page requirement after recovery retry
+  if (pdfCheck.pageCount !== CV_PDF_BOUNDS.REQUIRED_PAGES) {
+    return {
+      ok: false,
+      status: 'failed_validation',
+      validationError: 'Exceeded 1 page',
+      pageCount: pdfCheck.pageCount,
+      cv: currentCv,
+      replacements: currentReplacements,
+    };
   }
 
-  if (!binaryCheck.valid) {
-    throw new CvValidationError(binaryCheck.errors);
-  }
-
-  return {
-    cv: currentCv,
-    pdfBuffer,
-    byteLength: binaryCheck.byteLength,
-    pageCount: binaryCheck.pageCount,
-    density: chosenDensity,
-  };
+  throw new CvValidationError(pdfCheck.errors);
 }

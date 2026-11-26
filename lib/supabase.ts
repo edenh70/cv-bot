@@ -2,6 +2,13 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 let cachedClient: SupabaseClient | null = null;
 
+/**
+ * Explicit public columns for `public.jobs` so dashboard/list/mutation routes
+ * never transmit multi-hundred-KB tailored DOCX/PDF base64 blobs.
+ */
+export const JOB_PUBLIC_COLUMNS =
+  'id, source_id, company, title, url, match_score, summary_hebrew, changes_made, tailored_cv_json, tailoring_diffs_json, status, validation_error, applied_at, created_at';
+
 export function getSupabaseAdmin(): SupabaseClient {
   if (cachedClient) {
     return cachedClient;

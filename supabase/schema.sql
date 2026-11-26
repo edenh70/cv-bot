@@ -22,7 +22,11 @@ create table if not exists public.jobs (
   summary_hebrew text not null,
   changes_made text not null,
   tailored_cv_json jsonb not null,
-  status text not null default 'pending_review' check (status in ('pending_review', 'applied', 'archived')),
+  tailoring_diffs_json jsonb,
+  tailored_docx_base64 text,
+  tailored_pdf_base64 text,
+  status text not null default 'pending_review' check (status in ('pending_review', 'applied', 'archived', 'failed_validation')),
+  validation_error text,
   applied_at timestamptz,
   created_at timestamptz not null default now()
 );

@@ -1,9 +1,14 @@
 import { NextResponse } from 'next/server';
 import { isAuthenticated } from '@/lib/auth';
-import { CvValidationError, validateAndRenderCv } from '@/lib/cv-validator';
+import { CvValidationError, validatePdfBinary } from '@/lib/cv-validator';
+import {
+  convertDocxToPdf,
+  PdfConverterNotConfiguredError,
+} from '@/lib/docx-to-pdf';
 import { getActiveMasterCv } from '@/lib/master-cv-store';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 export async function GET(request: Request) {
   try {
@@ -13,16 +18,18 @@ export async function GET(request: Request) {
 
     const { searchParams } = new URL(request.url);
     const format = searchParams.get('format');
-    const { template, profile } = await getActiveMasterCv();
+    const { profile } = await getActiveMasterCv();
+
+    if (!profile?.original_file_base64) {
+      return NextResponse.json(
+        { error: 'No original .docx template is uploaded yet.' },
+        { status: 400 },
+      );
+    }
+
+    const docxBuffer = Buffer.from(profile.original_file_base64, 'base64');
 
     if (format === 'docx') {
-      if (!profile?.original_file_base64) {
-        return NextResponse.json(
-          { error: 'No original .docx template is uploaded yet.' },
-          { status: 400 },
-        );
-      }
-      const docxBuffer = Buffer.from(profile.original_file_base64, 'base64');
       return new Response(new Uint8Array(docxBuffer), {
         status: 200,
         headers: {
@@ -35,9 +42,14 @@ export async function GET(request: Request) {
       });
     }
 
-    const { pdfBuffer } = await validateAndRenderCv(template, undefined, {
-      preserveUploadedShape: true,
-    });
+    const pdfBuffer = await convertDocxToPdf(
+      docxBuffer,
+      profile.filename || 'Eden_Hadad_Master_CV.docx',
+    );
+    const pdfCheck = await validatePdfBinary(pdfBuffer);
+    if (!pdfCheck.valid) {
+      throw new CvValidationError(pdfCheck.errors);
+    }
 
     return new Response(new Uint8Array(pdfBuffer), {
       status: 200,
@@ -49,10 +61,13 @@ export async function GET(request: Request) {
     });
   } catch (error) {
     console.error('[api/master-cv/preview GET] Error:', error);
+    if (error instanceof PdfConverterNotConfiguredError) {
+      return NextResponse.json({ error: error.message }, { status: 503 });
+    }
     const message =
-      error instanceof CvValidationError
+      error instanceof CvValidationError || error instanceof Error
         ? error.message
-        : 'Failed to render Master CV preview.';
+        : 'Failed to generate Master CV preview.';
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
