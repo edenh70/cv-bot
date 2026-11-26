@@ -347,6 +347,7 @@ export async function runDailyScan(
     try {
       const visitedPages = new Set<string>();
       let currentPageUrl: string | null = source.url;
+      let pendingPaginationMode: 'switched_pages' | 'followed_subpage' | null = null;
 
       for (let pageIdx = 0; pageIdx < maxPagesPerSource; pageIdx++) {
         if (
@@ -356,6 +357,10 @@ export async function runDailyScan(
           Date.now() - startedAt > timeBudgetMs
         ) {
           break;
+        }
+
+        if (pageIdx > 0 && pendingPaginationMode) {
+          sourceReport.paginationStatus = pendingPaginationMode;
         }
 
         visitedPages.add(currentPageUrl);
@@ -404,15 +409,16 @@ export async function runDailyScan(
 
         // Page switching priority: deterministic next-page URL -> Gemini nextPageUrl -> subpage/ATS on page 1
         let nextUrl: string | null = null;
+        pendingPaginationMode = null;
         if (scraped.nextPageUrl && !visitedPages.has(scraped.nextPageUrl)) {
           nextUrl = scraped.nextPageUrl;
-          sourceReport.paginationStatus = 'switched_pages';
+          pendingPaginationMode = 'switched_pages';
         } else if (
           extraction.nextPageUrl &&
           !visitedPages.has(extraction.nextPageUrl)
         ) {
           nextUrl = extraction.nextPageUrl;
-          sourceReport.paginationStatus = 'switched_pages';
+          pendingPaginationMode = 'switched_pages';
         } else if (
           pageIdx === 0 &&
           extraction.jobs.length === 0 &&
@@ -420,7 +426,7 @@ export async function runDailyScan(
           !visitedPages.has(scraped.subpageCareerUrl)
         ) {
           nextUrl = scraped.subpageCareerUrl;
-          sourceReport.paginationStatus = 'followed_subpage';
+          pendingPaginationMode = 'followed_subpage';
         } else if (scraped.hasJsOnlyPagination && sourceReport.pagesVisited.length === 1) {
           sourceReport.paginationStatus = 'js_only';
           sourceReport.note =

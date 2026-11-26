@@ -88,10 +88,17 @@ export const surgicalReplacementItemSchema = z.object({
   tailored_text: z.string().trim().min(1),
 });
 
+const normalizedMatchScoreSchema = z.preprocess((val) => {
+  const n = typeof val === 'string' ? Number(val) : typeof val === 'number' ? val : NaN;
+  if (!Number.isFinite(n)) return 5;
+  const scaled = n > 10 && n <= 100 ? Math.round(n / 10) : Math.round(n);
+  return Math.max(1, Math.min(10, scaled));
+}, z.number().int().min(1).max(10));
+
 export const surgicalJobAnalysisResponseSchema = z.object({
   company: z.string().trim().min(1).max(120),
   title: z.string().trim().min(2).max(160),
-  match_score: z.coerce.number().int().min(1).max(10),
+  match_score: normalizedMatchScoreSchema,
   summary_hebrew: z.string().trim().min(5).max(1500),
   changes_made: z.string().trim().min(5).max(2000),
   replacements: z.array(surgicalReplacementItemSchema).default([]),
@@ -104,7 +111,7 @@ export const shortenReplacementsResponseSchema = z.object({
 export const jobAnalysisResponseSchema = z.object({
   company: z.string().trim().min(1).max(120),
   title: z.string().trim().min(2).max(160),
-  match_score: z.coerce.number().int().min(1).max(10),
+  match_score: normalizedMatchScoreSchema,
   summary_hebrew: z.string().trim().min(5).max(1500),
   changes_made: z.string().trim().min(5).max(2000),
   tailored_cv_json: tailoredCVRawSchema,
