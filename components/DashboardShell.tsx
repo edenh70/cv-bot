@@ -22,8 +22,10 @@ import { DEFAULT_GOOGLE_SHEET_URL } from '@/lib/google-sheet';
 import type {
   JobRecord,
   JobStatus,
+  MasterCvProfileRecord,
   ScanResultSummary,
   SourceRecord,
+  TailoredCV,
 } from '@/lib/types';
 
 type TabKey = 'feed' | 'sources' | 'applied';
@@ -39,6 +41,9 @@ export function DashboardShell() {
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [sources, setSources] = useState<SourceRecord[]>([]);
   const [sheetUrl, setSheetUrl] = useState<string>(DEFAULT_GOOGLE_SHEET_URL);
+  const [hasCustomCv, setHasCustomCv] = useState(false);
+  const [masterProfile, setMasterProfile] = useState<MasterCvProfileRecord | null>(null);
+  const [masterTemplate, setMasterTemplate] = useState<TailoredCV | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
@@ -68,9 +73,10 @@ export function DashboardShell() {
   const loadData = useCallback(async (isManualRefresh = false) => {
     if (isManualRefresh) setRefreshing(true);
     try {
-      const [jobsRes, sourcesRes] = await Promise.all([
+      const [jobsRes, sourcesRes, masterRes] = await Promise.all([
         fetch('/api/jobs', { cache: 'no-store' }),
         fetch('/api/sources', { cache: 'no-store' }),
+        fetch('/api/master-cv', { cache: 'no-store' }),
       ]);
 
       if (jobsRes.status === 401 || sourcesRes.status === 401) {
@@ -88,6 +94,12 @@ export function DashboardShell() {
         if (sourcesData.sheetUrl) {
           setSheetUrl(sourcesData.sheetUrl);
         }
+      }
+      if (masterRes.ok) {
+        const masterData = await masterRes.json();
+        setHasCustomCv(Boolean(masterData.hasCustomCv));
+        setMasterProfile(masterData.profile ?? null);
+        setMasterTemplate(masterData.template ?? null);
       }
     } finally {
       setLoading(false);
@@ -370,6 +382,17 @@ export function DashboardShell() {
                   )}
                 </form>
 
+                {!hasCustomCv && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('sources')}
+                    className="flex w-full items-center justify-between rounded-xl border border-amber-200 bg-amber-50/80 px-3.5 py-2.5 text-left text-xs font-medium text-amber-800 transition hover:bg-amber-100 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-300"
+                  >
+                    <span>Using default profile. Upload your actual CV template for surgical tailoring.</span>
+                    <span className="ml-2 shrink-0 font-bold underline">Upload &rarr;</span>
+                  </button>
+                )}
+
                 <div className="flex items-center justify-between">
                   <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                     Pending Review ({pendingJobs.length})
@@ -407,6 +430,12 @@ export function DashboardShell() {
                       key={job.id}
                       job={job}
                       onStatusChange={handleStatusChange}
+                      onJobUpdated={(updatedJob) => {
+                        setJobs((prev) =>
+                          prev.map((j) => (j.id === updatedJob.id ? updatedJob : j)),
+                        );
+                        showToast(`Re-tailored CV for ${updatedJob.company}`);
+                      }}
                     />
                   ))
                 )}
@@ -417,6 +446,19 @@ export function DashboardShell() {
               <QuickAddAndSourcesTab
                 sources={sources}
                 sheetUrl={sheetUrl}
+                hasCustomCv={hasCustomCv}
+                masterProfile={masterProfile}
+                masterTemplate={masterTemplate}
+                onMasterCvUpdated={(payload) => {
+                  setHasCustomCv(payload.hasCustomCv);
+                  setMasterProfile(payload.profile);
+                  setMasterTemplate(payload.template);
+                  showToast(
+                    payload.hasCustomCv
+                      ? 'Master CV template updated'
+                      : 'Reset to default Master CV',
+                  );
+                }}
                 onJobAnalyzed={handleJobAnalyzed}
                 onScanComplete={handleScanComplete}
                 onSourcesChanged={() => loadData(false)}

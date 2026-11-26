@@ -15,11 +15,26 @@ import {
   Sheet,
   RefreshCw,
 } from 'lucide-react';
-import type { JobRecord, ScanResultSummary, SourceRecord } from '@/lib/types';
+import { MasterCvCard } from './MasterCvCard';
+import type {
+  JobRecord,
+  MasterCvProfileRecord,
+  ScanResultSummary,
+  SourceRecord,
+  TailoredCV,
+} from '@/lib/types';
 
 interface QuickAddAndSourcesTabProps {
   sources: SourceRecord[];
   sheetUrl: string;
+  hasCustomCv: boolean;
+  masterProfile: MasterCvProfileRecord | null;
+  masterTemplate: TailoredCV | null;
+  onMasterCvUpdated: (payload: {
+    hasCustomCv: boolean;
+    profile: MasterCvProfileRecord | null;
+    template: TailoredCV;
+  }) => void;
   onJobAnalyzed: (job: JobRecord, alreadyExisted: boolean) => void;
   onScanComplete: (summary: ScanResultSummary) => void;
   onSourcesChanged: () => Promise<void>;
@@ -44,6 +59,10 @@ function formatLastScanned(iso: string | null): string {
 export function QuickAddAndSourcesTab({
   sources,
   sheetUrl,
+  hasCustomCv,
+  masterProfile,
+  masterTemplate,
+  onMasterCvUpdated,
   onJobAnalyzed,
   onScanComplete,
   onSourcesChanged,
@@ -227,6 +246,14 @@ export function QuickAddAndSourcesTab({
 
   return (
     <div className="space-y-5">
+      {/* Section 0: Master CV Upload & Template */}
+      <MasterCvCard
+        hasCustomCv={hasCustomCv}
+        profile={masterProfile}
+        template={masterTemplate}
+        onUpdated={onMasterCvUpdated}
+      />
+
       {/* Section 1: Paste Single Job URL */}
       <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/90">
         <div className="mb-3 flex items-center gap-2">

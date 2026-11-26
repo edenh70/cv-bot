@@ -1,22 +1,31 @@
 import { z } from 'zod';
-import { MASTER_CV } from './master-cv';
+import { getDefaultMasterCvTemplate } from './master-cv';
 import type {
   TailoredCV,
   TailoredCVExperienceItem,
+  TailoredCVExtraSection,
   TailoredCVToolboxCategory,
 } from './types';
 
 export const CV_LIMITS = {
-  SUMMARY_MAX: 260,
+  SUMMARY_MAX: 420,
   EXPERIENCE_COUNT: 3,
+  MAX_EXPERIENCE_ROLES: 6,
   BULLETS_PER_ROLE: 3,
-  BULLET_MAX: 115,
-  ROLE_MAX: 55,
+  MAX_BULLETS_PER_ROLE: 6,
+  BULLET_MAX: 185,
+  ROLE_MAX: 75,
+  COMPANY_MAX: 80,
+  PERIOD_MAX: 45,
   TOOLBOX_COUNT: 4,
-  TOOLBOX_LINE_MAX: 95,
-  TOOLBOX_CATEGORY_MAX: 26,
-  EDUCATION_MAX_LINES: 2,
-  EDUCATION_LINE_MAX: 95,
+  MAX_TOOLBOX_CATEGORIES: 6,
+  TOOLBOX_LINE_MAX: 145,
+  TOOLBOX_CATEGORY_MAX: 32,
+  EDUCATION_MAX_LINES: 4,
+  EDUCATION_LINE_MAX: 130,
+  MAX_EXTRA_SECTIONS: 3,
+  EXTRA_SECTION_ITEMS_MAX: 6,
+  EXTRA_SECTION_ITEM_MAX: 145,
 } as const;
 
 export const jobExtractionCandidateSchema = z.object({
@@ -31,6 +40,9 @@ export const jobExtractionResponseSchema = z.object({
 });
 
 export const tailoredCVRawSchema = z.object({
+  name: z.string().optional(),
+  title: z.string().optional(),
+  contactLine: z.string().optional(),
   summary: z.string().default(''),
   experience: z
     .array(
@@ -51,6 +63,14 @@ export const tailoredCVRawSchema = z.object({
     )
     .default([]),
   education: z.array(z.string()).default([]),
+  extraSections: z
+    .array(
+      z.object({
+        title: z.string().default(''),
+        items: z.array(z.string()).default([]),
+      }),
+    )
+    .optional(),
 });
 
 export const jobAnalysisResponseSchema = z.object({
@@ -60,6 +80,11 @@ export const jobAnalysisResponseSchema = z.object({
   summary_hebrew: z.string().trim().min(5).max(1500),
   changes_made: z.string().trim().min(5).max(2000),
   tailored_cv_json: tailoredCVRawSchema,
+});
+
+export const uploadedCvParseResponseSchema = z.object({
+  raw_text: z.string().trim().min(30),
+  template: tailoredCVRawSchema,
 });
 
 /**
@@ -73,72 +98,111 @@ export function truncateClean(text: string, maxLen: number): string {
 
   const sliced = normalized.slice(0, maxLen);
   const lastSpace = sliced.lastIndexOf(' ');
-  const candidate = lastSpace > Math.floor(maxLen * 0.55) ? sliced.slice(0, lastSpace) : sliced;
+  const candidate =
+    lastSpace > Math.floor(maxLen * 0.55) ? sliced.slice(0, lastSpace) : sliced;
   return candidate.replace(/[,;:\-–—]+$/g, '').trim();
 }
 
+function sanitizeExtraSections(
+  rawSections: Array<{ title: string; items: string[] }> | undefined,
+): TailoredCVExtraSection[] | undefined {
+  if (!rawSections || rawSections.length === 0) return undefined;
+  const cleaned = rawSections
+    .map((sec) => ({
+      title: truncateClean(sec.title || '', 45),
+      items: (sec.items ?? [])
+        .map((it) => truncateClean(it, CV_LIMITS.EXTRA_SECTION_ITEM_MAX))
+        .filter((it) => it.length > 0)
+        .slice(0, CV_LIMITS.EXTRA_SECTION_ITEMS_MAX),
+    }))
+    .filter((sec) => sec.title.length > 0 && sec.items.length > 0)
+    .slice(0, CV_LIMITS.MAX_EXTRA_SECTIONS);
+
+  return cleaned.length > 0 ? cleaned : undefined;
+}
+
 /**
- * Enforces all strict 1-page CV schema limits and locks authentic employer names
- * and dates to MASTER_CV so the PDF mathematically cannot overflow to page 2.
+ * Sanitizes a tailored CV against a Master CV template (defaulting to the
+ * built-in MASTER_CV when no custom template is provided), locking employers,
+ * periods, structure, and extra sections so nothing can be hallucinated.
  */
-export function sanitizeTailoredCV(raw: unknown): TailoredCV {
+export function sanitizeTailoredCV(
+  raw: unknown,
+  masterTemplate: TailoredCV = getDefaultMasterCvTemplate(),
+): TailoredCV {
   const parsed = tailoredCVRawSchema.safeParse(raw);
   const input = parsed.success
     ? parsed.data
-    : { summary: '', experience: [], toolbox: [], education: [] };
+    : {
+        summary: '',
+        experience: [],
+        toolbox: [],
+        education: [],
+      };
 
   const summary = truncateClean(
-    input.summary || MASTER_CV.defaultSummary,
+    input.summary || masterTemplate.summary,
     CV_LIMITS.SUMMARY_MAX,
   );
 
-  const experience = MASTER_CV.experience.map((masterRole, idx): TailoredCVExperienceItem => {
-    const candidate = input.experience[idx];
-    const roleTitle = truncateClean(
-      candidate?.role?.trim() || masterRole.role,
-      CV_LIMITS.ROLE_MAX,
-    );
+  const experience = masterTemplate.experience.map(
+    (masterRole, idx): TailoredCVExperienceItem => {
+      const candidate = input.experience[idx];
+      const roleTitle = truncateClean(
+        candidate?.role?.trim() || masterRole.role,
+        CV_LIMITS.ROLE_MAX,
+      );
 
-    const rawBullets = Array.isArray(candidate?.bullets) ? candidate.bullets : [];
-    const bullets: [string, string, string] = [
-      truncateClean(rawBullets[0]?.trim() || masterRole.bullets[0], CV_LIMITS.BULLET_MAX),
-      truncateClean(rawBullets[1]?.trim() || masterRole.bullets[1], CV_LIMITS.BULLET_MAX),
-      truncateClean(rawBullets[2]?.trim() || masterRole.bullets[2], CV_LIMITS.BULLET_MAX),
-    ];
+      const rawBullets = Array.isArray(candidate?.bullets) ? candidate.bullets : [];
+      const targetBulletCount = Math.max(
+        1,
+        Math.min(masterRole.bullets.length, CV_LIMITS.MAX_BULLETS_PER_ROLE),
+      );
 
-    return {
-      role: roleTitle,
-      // Always lock employer & dates to MASTER_CV to prevent hallucination
-      company: masterRole.company,
-      period: masterRole.period,
-      bullets,
-    };
-  }) as [
-    TailoredCVExperienceItem,
-    TailoredCVExperienceItem,
-    TailoredCVExperienceItem,
-  ];
+      const bullets: string[] = [];
+      for (let bIdx = 0; bIdx < targetBulletCount; bIdx++) {
+        const chosen =
+          rawBullets[bIdx]?.trim() ||
+          masterRole.bullets[bIdx] ||
+          masterRole.bullets[0] ||
+          '';
+        const cleaned = truncateClean(chosen, CV_LIMITS.BULLET_MAX);
+        if (cleaned) bullets.push(cleaned);
+      }
 
-  const toolbox = MASTER_CV.defaultToolbox.map((defaultCat, idx): TailoredCVToolboxCategory => {
-    const candidate = input.toolbox[idx];
-    const category = truncateClean(
-      candidate?.category?.trim() || defaultCat.category,
-      CV_LIMITS.TOOLBOX_CATEGORY_MAX,
-    );
-    // Reserve 2 chars for ": " separator between category and items
-    const maxItemsLen = Math.max(20, CV_LIMITS.TOOLBOX_LINE_MAX - category.length - 2);
-    const items = truncateClean(
-      candidate?.items?.trim() || defaultCat.items,
-      maxItemsLen,
-    );
+      return {
+        role: roleTitle,
+        // Always lock employer & dates to the Master CV template
+        company: masterRole.company,
+        period: masterRole.period,
+        bullets,
+      };
+    },
+  );
 
-    return { category, items };
-  }) as [
-    TailoredCVToolboxCategory,
-    TailoredCVToolboxCategory,
-    TailoredCVToolboxCategory,
-    TailoredCVToolboxCategory,
-  ];
+  const toolboxBase =
+    masterTemplate.toolbox.length > 0
+      ? masterTemplate.toolbox
+      : getDefaultMasterCvTemplate().toolbox;
+
+  const toolbox = toolboxBase.map(
+    (defaultCat, idx): TailoredCVToolboxCategory => {
+      const candidate = input.toolbox[idx];
+      const category = truncateClean(
+        candidate?.category?.trim() || defaultCat.category,
+        CV_LIMITS.TOOLBOX_CATEGORY_MAX,
+      );
+      const maxItemsLen = Math.max(
+        20,
+        CV_LIMITS.TOOLBOX_LINE_MAX - category.length - 2,
+      );
+      const items = truncateClean(
+        candidate?.items?.trim() || defaultCat.items,
+        maxItemsLen,
+      );
+      return { category, items };
+    },
+  );
 
   const rawEdu = input.education
     .map((line) => truncateClean(line, CV_LIMITS.EDUCATION_LINE_MAX))
@@ -148,14 +212,92 @@ export function sanitizeTailoredCV(raw: unknown): TailoredCV {
   const education =
     rawEdu.length > 0
       ? rawEdu
-      : MASTER_CV.education.map((line) =>
+      : masterTemplate.education.map((line) =>
           truncateClean(line, CV_LIMITS.EDUCATION_LINE_MAX),
         );
 
+  const extraSections = sanitizeExtraSections(
+    masterTemplate.extraSections ?? input.extraSections,
+  );
+
   return {
+    ...(masterTemplate.name ? { name: truncateClean(masterTemplate.name, 70) } : {}),
+    ...(masterTemplate.title ? { title: truncateClean(masterTemplate.title, 110) } : {}),
+    ...(masterTemplate.contactLine
+      ? { contactLine: truncateClean(masterTemplate.contactLine, 170) }
+      : {}),
     summary,
     experience,
     toolbox,
     education,
+    ...(extraSections ? { extraSections } : {}),
+  };
+}
+
+/**
+ * Sanitizes a freshly parsed uploaded Master CV verbatim without forcing it
+ * into the built-in 3-role / 4-toolbox shape.
+ */
+export function sanitizeUploadedMasterCv(raw: unknown): TailoredCV {
+  const parsed = tailoredCVRawSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error('Parsed uploaded CV did not match expected structure.');
+  }
+
+  const input = parsed.data;
+  const summary = truncateClean(input.summary, CV_LIMITS.SUMMARY_MAX);
+
+  const experience = input.experience
+    .slice(0, CV_LIMITS.MAX_EXPERIENCE_ROLES)
+    .map((item): TailoredCVExperienceItem => {
+      const bullets = item.bullets
+        .map((b) => truncateClean(b, CV_LIMITS.BULLET_MAX))
+        .filter((b) => b.length > 0)
+        .slice(0, CV_LIMITS.MAX_BULLETS_PER_ROLE);
+      return {
+        role: truncateClean(item.role, CV_LIMITS.ROLE_MAX),
+        company: truncateClean(item.company || '', CV_LIMITS.COMPANY_MAX),
+        period: truncateClean(item.period || '', CV_LIMITS.PERIOD_MAX),
+        bullets,
+      };
+    })
+    .filter((item) => item.role.length > 0 && item.bullets.length > 0);
+
+  const toolbox = input.toolbox
+    .slice(0, CV_LIMITS.MAX_TOOLBOX_CATEGORIES)
+    .map((group): TailoredCVToolboxCategory => {
+      const category = truncateClean(
+        group.category || 'Skills',
+        CV_LIMITS.TOOLBOX_CATEGORY_MAX,
+      );
+      const maxItemsLen = Math.max(
+        20,
+        CV_LIMITS.TOOLBOX_LINE_MAX - category.length - 2,
+      );
+      return {
+        category,
+        items: truncateClean(group.items, maxItemsLen),
+      };
+    })
+    .filter((group) => group.items.length > 0);
+
+  const education = input.education
+    .map((line) => truncateClean(line, CV_LIMITS.EDUCATION_LINE_MAX))
+    .filter((line) => line.length > 0)
+    .slice(0, CV_LIMITS.EDUCATION_MAX_LINES);
+
+  const extraSections = sanitizeExtraSections(input.extraSections);
+
+  return {
+    ...(input.name?.trim() ? { name: truncateClean(input.name, 70) } : {}),
+    ...(input.title?.trim() ? { title: truncateClean(input.title, 110) } : {}),
+    ...(input.contactLine?.trim()
+      ? { contactLine: truncateClean(input.contactLine, 170) }
+      : {}),
+    summary,
+    experience,
+    toolbox,
+    education,
+    ...(extraSections ? { extraSections } : {}),
   };
 }

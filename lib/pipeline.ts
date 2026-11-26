@@ -2,8 +2,9 @@ import { validateAndRenderCv } from './cv-validator';
 import { analyzeAndTailorJob, extractMatchingJobs } from './gemini';
 import { syncSourcesFromGoogleSheet } from './google-sheet';
 import { normalizeAndValidateUrl, scrapeUrlWithJina } from './jina';
+import { getActiveMasterCv } from './master-cv-store';
 import { getSupabaseAdmin } from './supabase';
-import type { JobRecord, ScanResultSummary, SourceRecord } from './types';
+import type { JobRecord, ScanResultSummary, SourceRecord, TailoredCV } from './types';
 
 interface PendingCandidate {
   sourceId: string;
@@ -65,6 +66,7 @@ export async function analyzeSingleJobUrl(
     companyHint?: string;
     titleHint?: string;
     customPrompt?: string;
+    masterTemplate?: TailoredCV;
   },
 ): Promise<{ job: JobRecord; alreadyExisted: boolean }> {
   const url = normalizeAndValidateUrl(rawUrl);
@@ -84,19 +86,26 @@ export async function analyzeSingleJobUrl(
     return { job: existing as JobRecord, alreadyExisted: true };
   }
 
+  const masterTemplate =
+    options?.masterTemplate ?? (await getActiveMasterCv()).template;
   const markdown = await scrapeUrlWithJina(url);
   const analysis = await analyzeAndTailorJob(url, markdown, {
     company: options?.companyHint,
     title: options?.titleHint,
     customPrompt: options?.customPrompt,
+    masterTemplate,
   });
 
   // Fail-safe guardrail: validate content AND verify 1-page PDF renders cleanly before storing
-  const validated = await validateAndRenderCv(analysis.tailored_cv_json, {
-    match_score: analysis.match_score,
-    summary_hebrew: analysis.summary_hebrew,
-    changes_made: analysis.changes_made,
-  });
+  const validated = await validateAndRenderCv(
+    analysis.tailored_cv_json,
+    {
+      match_score: analysis.match_score,
+      summary_hebrew: analysis.summary_hebrew,
+      changes_made: analysis.changes_made,
+    },
+    { masterTemplate },
+  );
 
   const { data: inserted, error: insertError } = await supabase
     .from('jobs')
@@ -267,6 +276,7 @@ export async function runDailyScan(
   }
 
   if (toProcess.length > 0) {
+    const { template: activeMasterTemplate } = await getActiveMasterCv();
     const settled = await Promise.allSettled(
       toProcess.map((candidate) =>
         analyzeSingleJobUrl(candidate.url, {
@@ -274,6 +284,7 @@ export async function runDailyScan(
           companyHint: candidate.company,
           titleHint: candidate.title,
           customPrompt,
+          masterTemplate: activeMasterTemplate,
         }),
       ),
     );

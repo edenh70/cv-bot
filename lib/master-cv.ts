@@ -1,4 +1,8 @@
-import type { TailoredCVExperienceItem, TailoredCVToolboxCategory } from './types';
+import type {
+  TailoredCV,
+  TailoredCVExperienceItem,
+  TailoredCVToolboxCategory,
+} from './types';
 
 export interface MasterExperienceEntry extends TailoredCVExperienceItem {
   authenticContext: string;
@@ -101,3 +105,20 @@ export const MASTER_CV = {
     TailoredCVToolboxCategory,
   ],
 } as const;
+
+export function getDefaultMasterCvTemplate(): TailoredCV {
+  return {
+    summary: MASTER_CV.defaultSummary,
+    experience: MASTER_CV.experience.map((item) => ({
+      role: item.role,
+      company: item.company,
+      period: item.period,
+      bullets: [...item.bullets],
+    })),
+    toolbox: MASTER_CV.defaultToolbox.map((group) => ({
+      category: group.category,
+      items: group.items,
+    })),
+    education: [...MASTER_CV.education],
+  };
+}

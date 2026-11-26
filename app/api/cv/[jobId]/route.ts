@@ -43,6 +43,8 @@ export async function GET(
 
     const { pdfBuffer } = await validateAndRenderCv(
       job.tailored_cv_json as TailoredCV,
+      undefined,
+      { preserveUploadedShape: true },
     );
     const safeCompany = sanitizeFilenameSegment(job.company);
     const filename = `Eden_Hadad_CV_${safeCompany}.pdf`;

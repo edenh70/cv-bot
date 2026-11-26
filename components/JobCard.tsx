@@ -11,12 +11,14 @@ import {
   ChevronUp,
   Sparkles,
   Loader2,
+  RefreshCw,
 } from 'lucide-react';
 import type { JobRecord, JobStatus } from '@/lib/types';
 
 interface JobCardProps {
   job: JobRecord;
   onStatusChange: (jobId: string, status: JobStatus) => Promise<void>;
+  onJobUpdated?: (updated: JobRecord) => void;
 }
 
 function getScoreBadgeClasses(score: number): string {
@@ -40,9 +42,11 @@ function formatShortDate(iso: string): string {
   }
 }
 
-export function JobCard({ job, onStatusChange }: JobCardProps) {
+export function JobCard({ job, onStatusChange, onJobUpdated }: JobCardProps) {
   const [showChanges, setShowChanges] = useState(true);
   const [busyStatus, setBusyStatus] = useState<JobStatus | null>(null);
+  const [retailoring, setRetailoring] = useState(false);
+  const [retailorError, setRetailorError] = useState<string | null>(null);
 
   async function triggerStatus(status: JobStatus) {
     if (busyStatus) return;
@@ -51,6 +55,29 @@ export function JobCard({ job, onStatusChange }: JobCardProps) {
       await onStatusChange(job.id, status);
     } finally {
       setBusyStatus(null);
+    }
+  }
+
+  async function handleRetailor() {
+    if (retailoring) return;
+    setRetailoring(true);
+    setRetailorError(null);
+    try {
+      const res = await fetch(`/api/jobs/${job.id}/retailor`, {
+        method: 'POST',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setRetailorError(data.error || 'Failed to re-tailor CV.');
+        return;
+      }
+      if (data.job && onJobUpdated) {
+        onJobUpdated(data.job as JobRecord);
+      }
+    } catch {
+      setRetailorError('Network error while re-tailoring CV.');
+    } finally {
+      setRetailoring(false);
     }
   }
 
@@ -177,21 +204,41 @@ export function JobCard({ job, onStatusChange }: JobCardProps) {
           <span>Mark as Applied</span>
         </button>
 
-        {/* 4. Archive / Dismiss */}
-        <button
-          type="button"
-          disabled={busyStatus !== null}
-          onClick={() => triggerStatus('archived')}
-          className="flex h-11 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 active:scale-[0.98] disabled:opacity-60 dark:border-slate-800 dark:bg-slate-800/60 dark:text-slate-400 dark:hover:bg-slate-800"
-        >
-          {busyStatus === 'archived' ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Archive className="h-4 w-4 shrink-0" />
-          )}
-          <span>Archive</span>
-        </button>
+        {/* 4. Archive / Dismiss + Re-tailor */}
+        <div className="flex gap-1.5">
+          <button
+            type="button"
+            disabled={retailoring || busyStatus !== null}
+            onClick={handleRetailor}
+            title="Re-tailor CV using current Master CV template"
+            className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-xl border border-sky-200 bg-sky-50 px-2.5 text-xs font-semibold text-[#003366] transition hover:bg-sky-100 active:scale-[0.98] disabled:opacity-60 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-300 dark:hover:bg-sky-950"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${retailoring ? 'animate-spin' : ''}`} />
+            <span>{retailoring ? 'Updating...' : 'Re-tailor'}</span>
+          </button>
+
+          <button
+            type="button"
+            disabled={busyStatus !== null || retailoring}
+            onClick={() => triggerStatus('archived')}
+            title="Archive"
+            aria-label="Archive"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-600 transition hover:bg-slate-100 active:scale-[0.98] disabled:opacity-60 dark:border-slate-800 dark:bg-slate-800/60 dark:text-slate-400 dark:hover:bg-slate-800"
+          >
+            {busyStatus === 'archived' ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Archive className="h-4 w-4 shrink-0" />
+            )}
+          </button>
+        </div>
       </div>
+
+      {retailorError && (
+        <p className="mt-2 text-xs font-medium text-rose-600 dark:text-rose-400">
+          {retailorError}
+        </p>
+      )}
     </article>
   );
 }

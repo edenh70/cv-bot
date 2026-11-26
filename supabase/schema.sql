@@ -41,3 +41,13 @@ create index if not exists idx_sources_is_active
 -- which bypasses RLS safely while blocking all unauthenticated anon/public access.
 alter table public.sources enable row level security;
 alter table public.jobs enable row level security;
+
+create table if not exists public.master_cv_profile (
+  id text primary key default 'default',
+  filename text not null,
+  raw_text text not null,
+  structured_json jsonb not null,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.master_cv_profile enable row level security;

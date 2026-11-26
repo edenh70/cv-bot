@@ -15,7 +15,7 @@ import {
   toGoogleSheetCsvUrl,
 } from '../lib/google-sheet';
 import { cleanScrapedMarkdown, normalizeAndValidateUrl } from '../lib/jina';
-import { MASTER_CV } from '../lib/master-cv';
+import { getDefaultMasterCvTemplate, MASTER_CV } from '../lib/master-cv';
 import type { TailoredCV } from '../lib/types';
 
 function makeValidMasterTailoredCv(): TailoredCV {
@@ -69,7 +69,7 @@ test('sanitizeTailoredCV clamps oversized fields and locks companies & periods t
   for (const tb of sanitized.toolbox) {
     assert.ok(tb.category.length + 2 + tb.items.length <= CV_LIMITS.TOOLBOX_LINE_MAX);
   }
-  assert.ok(sanitized.education.length <= 2);
+  assert.ok(sanitized.education.length <= CV_LIMITS.EDUCATION_MAX_LINES);
 });
 
 test('validateAndRenderCv produces a valid strictly 1-page PDF from authentic Master CV', async () => {
@@ -90,7 +90,11 @@ test('validateAndRenderCv produces a valid strictly 1-page PDF from authentic Ma
 test('validateTailoredCvContent rejects hallucinated companies, LLM leakage, non-Hebrew summary, and invalid scores', () => {
   const badCompanyCv = makeValidMasterTailoredCv();
   badCompanyCv.experience[1].company = 'Google DeepMind Fake';
-  const resCompany = validateTailoredCvContent(badCompanyCv);
+  const resCompany = validateTailoredCvContent(
+    badCompanyCv,
+    undefined,
+    getDefaultMasterCvTemplate(),
+  );
   assert.equal(resCompany.valid, false);
   assert.ok(resCompany.errors.some((e) => e.includes('does not match Master CV')));
 
@@ -173,4 +177,81 @@ test('cleanScrapedMarkdown strips tracking pixels while keeping job links, and U
 
   assert.throws(() => normalizeAndValidateUrl('http://localhost:3000/test'));
   assert.throws(() => normalizeAndValidateUrl('http://192.168.1.1/admin'));
+});
+
+test('custom uploaded 4-role CV with extraSections renders strictly 1 page via density scaling and locks employers on tailoring', async () => {
+  const customMaster: TailoredCV = {
+    name: 'Eden Hadad',
+    title: 'Senior Data Analyst & BI Specialist',
+    contactLine: 'Tel Aviv, Israel | edenhadad70@gmail.com | 054-9451235',
+    summary:
+      'Experienced Data Analyst specializing in product funnels, SQL data modeling, Python pipelines, and executive KPI reporting across SaaS and e-commerce.',
+    experience: [
+      {
+        role: 'Data Analyst & AI Solutions',
+        company: 'Freelance Consulting',
+        period: '2023 – Present',
+        bullets: [
+          'Built automated KPI pipelines and custom Looker/Tableau executive dashboards for SaaS clients.',
+          'Analyzed product event telemetry and cohort retention in Python (Pandas, NumPy) and BigQuery.',
+          'Automated data QA workflows using LLM integrations to cut manual reporting overhead by 40%.',
+        ],
+      },
+      {
+        role: 'Product Data Analyst',
+        company: 'Montara',
+        period: '2021 – 2023',
+        bullets: [
+          'Owned product funnel analytics, A/B experimentation, and feature adoption tracking.',
+          'Trained production classification models improving anomaly detection accuracy by 15%.',
+          'Partnered with Data Engineering to maintain Airflow and SQL ETL pipelines.',
+        ],
+      },
+      {
+        role: 'Data Analyst',
+        company: 'Shufersal Digital',
+        period: '2020 – 2021',
+        bullets: [
+          'Queried multi-million-row e-commerce tables using complex SQL Window Functions and CTEs.',
+          'Partnered with Marketing and Product VPs on revenue attribution and campaign ROI models.',
+        ],
+      },
+      {
+        role: 'Operations Analyst (Intern)',
+        company: 'Ben-Gurion Lab',
+        period: '2019 – 2020',
+        bullets: [
+          'Modeled supply-chain throughput bottlenecks using Python and Excel statistical analysis.',
+          'Automated weekly KPI status reports for operations leadership.',
+        ],
+      },
+    ],
+    toolbox: [
+      { category: 'Query & Code', items: 'SQL (BigQuery, PostgreSQL, MySQL), Python (Pandas, NumPy, Scikit-Learn)' },
+      { category: 'BI & Experimentation', items: 'Tableau, Power BI, Metabase, A/B Testing, Funnel & Cohort Analysis' },
+      { category: 'Data Engineering', items: 'Apache Airflow, PySpark, dbt, Git, Docker' },
+    ],
+    education: [
+      'B.Sc. Industrial Engineering & Management — Ben-Gurion University (2016–2020)',
+      'G-Academy — PySpark & Python for Data Science',
+    ],
+    extraSections: [
+      { title: 'Languages', items: ['Hebrew (Native)', 'English (Fluent)'] },
+      { title: 'Military Service', items: ['IDF — Full Service, Operations & Analytics Support'] },
+    ],
+  };
+
+  const rendered = await validateAndRenderCv(customMaster, undefined, {
+    preserveUploadedShape: true,
+  });
+  assert.equal(rendered.pageCount, 1);
+  assert.equal(rendered.cv.experience.length, 4);
+  assert.equal(rendered.cv.extraSections?.length, 2);
+
+  // Tailored CV trying to tamper with company name must be rejected by custom masterTemplate check
+  const tampered = structuredClone(customMaster);
+  tampered.experience[1].company = 'Tampered Startup';
+  const check = validateTailoredCvContent(tampered, undefined, customMaster);
+  assert.equal(check.valid, false);
+  assert.ok(check.errors.some((e) => e.includes('does not match Master CV')));
 });

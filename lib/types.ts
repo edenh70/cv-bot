@@ -4,7 +4,7 @@ export interface TailoredCVExperienceItem {
   role: string;
   company: string;
   period: string;
-  bullets: [string, string, string];
+  bullets: string[];
 }
 
 export interface TailoredCVToolboxCategory {
@@ -12,20 +12,28 @@ export interface TailoredCVToolboxCategory {
   items: string;
 }
 
+export interface TailoredCVExtraSection {
+  title: string;
+  items: string[];
+}
+
 export interface TailoredCV {
+  name?: string;
+  title?: string;
+  contactLine?: string;
   summary: string;
-  experience: [
-    TailoredCVExperienceItem,
-    TailoredCVExperienceItem,
-    TailoredCVExperienceItem,
-  ];
-  toolbox: [
-    TailoredCVToolboxCategory,
-    TailoredCVToolboxCategory,
-    TailoredCVToolboxCategory,
-    TailoredCVToolboxCategory,
-  ];
+  experience: TailoredCVExperienceItem[];
+  toolbox: TailoredCVToolboxCategory[];
   education: string[];
+  extraSections?: TailoredCVExtraSection[];
+}
+
+export interface MasterCvProfileRecord {
+  id: string;
+  filename: string;
+  raw_text: string;
+  structured_json: TailoredCV;
+  updated_at: string;
 }
 
 export interface SourceRecord {

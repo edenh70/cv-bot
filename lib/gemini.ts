@@ -1,10 +1,13 @@
-import { GoogleGenAI, Type, type GenerateContentConfig } from '@google/genai';
-import { MASTER_CV } from './master-cv';
+import { GoogleGenAI, Type, type GenerateContentConfig, type Part } from '@google/genai';
+import mammoth from 'mammoth';
+import { getDefaultMasterCvTemplate, MASTER_CV } from './master-cv';
 import {
   CV_LIMITS,
   jobAnalysisResponseSchema,
   jobExtractionResponseSchema,
   sanitizeTailoredCV,
+  sanitizeUploadedMasterCv,
+  uploadedCvParseResponseSchema,
 } from './cv-schema';
 import { resolveCandidateUrl } from './jina';
 import type {
@@ -223,6 +226,157 @@ export async function extractMatchingJobs(
   return { jobs: results, nextPageUrl };
 }
 
+export async function parseUploadedCvToTemplate(params: {
+  filename: string;
+  mimeType: string;
+  buffer: Buffer;
+}): Promise<{ rawText: string; template: TailoredCV }> {
+  const ai = getGeminiClient();
+  const ext = params.filename.toLowerCase().split('.').pop() || '';
+  const isPdf = params.mimeType === 'application/pdf' || ext === 'pdf';
+  const isDocx =
+    params.mimeType ===
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    ext === 'docx';
+
+  let extractedText = '';
+  const contentParts: Part[] = [];
+
+  const extractionInstruction = [
+    `You are a strict verbatim resume parser. Extract the user's uploaded CV into structured JSON WITHOUT rewriting, summarizing, inventing, or dropping any authentic details.`,
+    `Rules:`,
+    `1. "raw_text": plain-text verbatim transcription of the entire CV.`,
+    `2. "template":`,
+    `   - "name": candidate full name as written.`,
+    `   - "title": headline/role subtitle as written (or "" if none).`,
+    `   - "contactLine": pipe-separated contact items as written (e.g., "Tel Aviv | email | phone | LinkedIn | GitHub").`,
+    `   - "summary": professional summary/profile paragraph verbatim (trimmed cleanly, max ${CV_LIMITS.SUMMARY_MAX} chars).`,
+    `   - "experience": ALL work experience roles in exact order, keeping exact role title, company name, period/dates, and ALL bullet points verbatim (max ${CV_LIMITS.BULLET_MAX} chars each).`,
+    `   - "toolbox": ALL skills/tools grouped into 1–${CV_LIMITS.MAX_TOOLBOX_CATEGORIES} clean categories (e.g., "Data & Languages", "BI & Visualization", "Analytics & ML", "Tools").`,
+    `   - "education": ALL education/certification lines verbatim (1–${CV_LIMITS.EDUCATION_MAX_LINES} lines).`,
+    `   - "extraSections": any other sections present (e.g., "Languages", "Military Service", "Projects", "Volunteering"), or [] if none.`,
+  ].join('\n');
+
+  if (isPdf) {
+    contentParts.push({ text: extractionInstruction });
+    contentParts.push({
+      inlineData: {
+        mimeType: 'application/pdf',
+        data: params.buffer.toString('base64'),
+      },
+    });
+  } else if (isDocx) {
+    const result = await mammoth.extractRawText({ buffer: params.buffer });
+    extractedText = result.value.trim();
+    if (extractedText.length < 40) {
+      throw new Error('Could not extract readable text from the DOCX file.');
+    }
+    contentParts.push({
+      text: `${extractionInstruction}\n\nCV TEXT:\n${extractedText.slice(0, 20000)}`,
+    });
+  } else if (ext === 'txt' || ext === 'md' || params.mimeType.startsWith('text/')) {
+    extractedText = params.buffer.toString('utf8').trim();
+    if (extractedText.length < 40) {
+      throw new Error('Uploaded text CV is too short or empty.');
+    }
+    contentParts.push({
+      text: `${extractionInstruction}\n\nCV TEXT:\n${extractedText.slice(0, 20000)}`,
+    });
+  } else {
+    throw new Error('Unsupported file format. Please upload a .pdf, .docx, or .txt CV.');
+  }
+
+  let lastError: unknown;
+  let rawJsonText: string | undefined;
+
+  for (let i = 0; i < TAILORING_MODELS.length; i++) {
+    const model = TAILORING_MODELS[i];
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: [{ role: 'user', parts: contentParts }],
+        config: {
+          temperature: 0,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              raw_text: { type: Type.STRING },
+              template: {
+                type: Type.OBJECT,
+                properties: {
+                  name: { type: Type.STRING },
+                  title: { type: Type.STRING },
+                  contactLine: { type: Type.STRING },
+                  summary: { type: Type.STRING },
+                  experience: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        role: { type: Type.STRING },
+                        company: { type: Type.STRING },
+                        period: { type: Type.STRING },
+                        bullets: { type: Type.ARRAY, items: { type: Type.STRING } },
+                      },
+                      required: ['role', 'company', 'period', 'bullets'],
+                    },
+                  },
+                  toolbox: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        category: { type: Type.STRING },
+                        items: { type: Type.STRING },
+                      },
+                      required: ['category', 'items'],
+                    },
+                  },
+                  education: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  extraSections: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        title: { type: Type.STRING },
+                        items: { type: Type.ARRAY, items: { type: Type.STRING } },
+                      },
+                      required: ['title', 'items'],
+                    },
+                  },
+                },
+                required: ['summary', 'experience', 'toolbox', 'education'],
+              },
+            },
+            required: ['raw_text', 'template'],
+          },
+          httpOptions: { timeout: 30000 },
+        },
+      });
+      rawJsonText = response.text;
+      break;
+    } catch (error) {
+      lastError = error;
+      if (i < TAILORING_MODELS.length - 1 && isRetryableGeminiError(error)) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  if (!rawJsonText) {
+    throw lastError instanceof Error ? lastError : new Error('Failed to parse uploaded CV.');
+  }
+
+  const parsedJson = parseJsonText(rawJsonText);
+  const validated = uploadedCvParseResponseSchema.parse(parsedJson);
+  return {
+    rawText: extractedText || validated.raw_text,
+    template: sanitizeUploadedMasterCv(validated.template),
+  };
+}
+
 export interface TailoredJobAnalysis {
   company: string;
   title: string;
@@ -235,44 +389,61 @@ export interface TailoredJobAnalysis {
 export async function analyzeAndTailorJob(
   jobUrl: string,
   jobMarkdown: string,
-  hints?: { company?: string; title?: string; customPrompt?: string },
+  hints?: {
+    company?: string;
+    title?: string;
+    customPrompt?: string;
+    masterTemplate?: TailoredCV;
+  },
 ): Promise<TailoredJobAnalysis> {
   const ai = getGeminiClient();
+  const master = hints?.masterTemplate ?? getDefaultMasterCvTemplate();
 
   const masterProfileText = [
-    `Name: ${MASTER_CV.name}`,
-    `Title: ${MASTER_CV.title}`,
-    `Experience (EXACT 3 ROLES IN THIS ORDER):`,
-    ...MASTER_CV.experience.map(
+    `Name: ${master.name || MASTER_CV.name}`,
+    `Title: ${master.title || MASTER_CV.title}`,
+    master.contactLine ? `Contact: ${master.contactLine}` : '',
+    `Summary: ${master.summary}`,
+    `Experience (EXACT ${master.experience.length} ROLES IN THIS ORDER):`,
+    ...master.experience.map(
       (exp, idx) =>
-        `${idx + 1}. ${exp.role} — ${exp.company} (${exp.period}): ${exp.authenticContext}`,
+        `${idx + 1}. ${exp.role} — ${exp.company} (${exp.period})\n   Bullets (${exp.bullets.length}):\n${exp.bullets
+          .map((b) => `   - ${b}`)
+          .join('\n')}`,
     ),
-    `Education: ${MASTER_CV.education.join(' | ')}`,
-    `Authentic Toolbox: ${MASTER_CV.toolboxList.join(', ')}`,
-  ].join('\n');
+    `Toolbox (${master.toolbox.length} categories):`,
+    ...master.toolbox.map((tb) => `- ${tb.category}: ${tb.items}`),
+    `Education: ${master.education.join(' | ')}`,
+    ...(master.extraSections ?? []).map(
+      (sec) => `${sec.title}: ${sec.items.join(' | ')}`,
+    ),
+  ]
+    .filter(Boolean)
+    .join('\n');
 
   const prompt = [
-    `You are an expert Data Analyst CV Strategist & Career Coach.`,
-    `Analyze the job posting below and tailor Eden Hadad's strictly 1-page CV for maximum relevance.`,
+    `You are an expert Data Analyst CV Editor performing LIGHT-TOUCH SURGICAL TAILORING.`,
+    `Treat the Master CV below as the user's FINAL POLISHED TEMPLATE. Do NOT rewrite it from scratch.`,
     ``,
-    `IMMUTABLE SOURCE OF TRUTH (NEVER INVENT FAKE COMPANIES, DEGREES, DATES, METRICS, OR TOOLS):`,
+    `MASTER CV TEMPLATE (IMMUTABLE STRUCTURE & SOURCE OF TRUTH):`,
     masterProfileText,
     ``,
-    `STRICT RULES:`,
-    `1. You may rephrase, highlight, and prioritize skills/projects from the Master CV to align with the job posting's keywords, but NEVER fabricate any company, degree, certification, date, or tool that Eden does not possess.`,
-    `2. "match_score": integer 1-10 reflecting realistic fit for Eden's 5+ years Data Analyst profile.`,
-    `3. "summary_hebrew": Concise Hebrew summary (3-5 bullet points or short paragraph in natural Hebrew) explaining the role, team/domain, key technical requirements, and location/hybrid setup.`,
-    `4. "changes_made": Concise English bulleted list (using "- " prefix per line, 3-5 bullets) explaining specifically what was emphasized or rephrased in the tailored CV.`,
-    `5. "tailored_cv_json" HARD CHARACTER & STRUCTURE LIMITS (CRITICAL SO PDF STAYS STRICTLY 1 PAGE):`,
-    `   - summary: max ${CV_LIMITS.SUMMARY_MAX} characters.`,
-    `   - experience: EXACTLY 3 items matching the 3 Master CV roles in reverse-chronological order (Freelance, Montara, Shufersal). Keep company & period faithful, and provide EXACTLY 3 concise impact bullets per role, each STRICTLY <= ${CV_LIMITS.BULLET_MAX} characters.`,
-    `   - toolbox: EXACTLY 4 categories (e.g., "Data & Languages", "BI & Visualization", "Analytics & ML", "Data Engineering & AI"). Each category + ": " + items must be <= ${CV_LIMITS.TOOLBOX_LINE_MAX} characters total (category <= ${CV_LIMITS.TOOLBOX_CATEGORY_MAX} chars). Only include authentic tools from the Master CV, ordered by relevance to the job.`,
-    `   - education: max ${CV_LIMITS.EDUCATION_MAX_LINES} lines matching the Master CV education.`,
+    `LIGHT-TOUCH TAILORING RULES (STRICT):`,
+    `1. PRESERVE STRUCTURE & WORDING: Keep at least 75% of the Master CV's exact wording verbatim. Keep the exact same ${master.experience.length} roles, exact company names, exact dates, exact bullet counts per role, exact education, and exact extra sections.`,
+    `2. SURGICAL SKILL ALIGNMENT ONLY: Make only minimal, targeted adjustments in "summary" and at most 1–2 bullets per role so the job's required skills and keywords stand out naturally. Keep the remaining bullets nearly identical to the Master CV.`,
+    `3. ZERO FABRICATION: NEVER invent fake companies, roles, degrees, dates, metrics, or tools not present in the Master CV. In "toolbox", keep all authentic tools and simply reorder items/categories so job-relevant skills appear first.`,
+    `4. "match_score": integer 1-10 reflecting realistic fit.`,
+    `5. "summary_hebrew": Concise Hebrew summary (3-5 lines in natural Hebrew) explaining the role, team/domain, key technical requirements, and location/hybrid setup.`,
+    `6. "changes_made": Concise English bulleted list (using "- " prefix, 2-4 bullets) stating ONLY the minimal surgical edits made to align with the job.`,
+    `7. CHARACTER LIMITS (SO PDF STAYS STRICTLY 1 PAGE):`,
+    `   - summary: max ${CV_LIMITS.SUMMARY_MAX} chars`,
+    `   - each bullet: max ${CV_LIMITS.BULLET_MAX} chars`,
+    `   - each toolbox row ("category: items"): max ${CV_LIMITS.TOOLBOX_LINE_MAX} chars`,
     ``,
     hints?.company ? `Hinted Company: ${hints.company}` : '',
     hints?.title ? `Hinted Title: ${hints.title}` : '',
     hints?.customPrompt
-      ? `Additional User Focus: ${hints.customPrompt} (prioritize authentic relevant experience/keywords accordingly while NEVER inventing fake companies, degrees, or tools)`
+      ? `Additional User Focus: ${hints.customPrompt} (emphasize relevant authentic skills while preserving the template)`
       : '',
     `Job URL: ${jobUrl}`,
     ``,
@@ -283,7 +454,7 @@ export async function analyzeAndTailorJob(
     .join('\n');
 
   const rawText = await generateJsonWithFallback(ai, prompt, {
-    temperature: 0.2,
+    temperature: 0.15,
     responseMimeType: 'application/json',
     responseSchema: {
       type: Type.OBJECT,
@@ -352,6 +523,6 @@ export async function analyzeAndTailorJob(
     match_score: validated.match_score,
     summary_hebrew: validated.summary_hebrew,
     changes_made: validated.changes_made,
-    tailored_cv_json: sanitizeTailoredCV(validated.tailored_cv_json),
+    tailored_cv_json: sanitizeTailoredCV(validated.tailored_cv_json, master),
   };
 }

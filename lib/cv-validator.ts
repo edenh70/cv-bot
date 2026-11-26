@@ -1,6 +1,10 @@
-import { renderCvPdfBuffer } from './cv-pdf';
-import { CV_LIMITS, sanitizeTailoredCV, truncateClean } from './cv-schema';
-import { MASTER_CV } from './master-cv';
+import { renderCvPdfBuffer, type PdfDensity } from './cv-pdf';
+import {
+  CV_LIMITS,
+  sanitizeTailoredCV,
+  sanitizeUploadedMasterCv,
+  truncateClean,
+} from './cv-schema';
 import type { TailoredCV } from './types';
 
 export const CV_PDF_BOUNDS = {
@@ -13,6 +17,7 @@ export const LEAKAGE_PATTERN =
   /\[INSERT|TODO\b|FIXME\b|\bTBD\b|Lorem ipsum|As an AI|Here is your|```|\{\{|\}\}|\bundefined\b|\bNaN\b/i;
 
 const HEBREW_CHAR_PATTERN = /[\u0590-\u05FF]/;
+const DENSITY_ORDER: PdfDensity[] = ['normal', 'compact', 'tight'];
 
 export class CvValidationError extends Error {
   readonly reasons: string[];
@@ -94,6 +99,7 @@ export function validatePdfBinary(buffer: Buffer): PdfBinaryValidationResult {
 export function validateTailoredCvContent(
   cv: TailoredCV,
   meta?: ValidatedCvMetadata,
+  masterTemplate?: TailoredCV,
 ): CvContentValidationResult {
   const errors: string[] = [];
 
@@ -102,40 +108,48 @@ export function validateTailoredCvContent(
   }
 
   const summary = (cv.summary ?? '').trim();
-  if (summary.length < 40 || summary.length > CV_LIMITS.SUMMARY_MAX) {
+  if (summary.length > CV_LIMITS.SUMMARY_MAX) {
     errors.push(
-      `Summary length (${summary.length}) must be between 40 and ${CV_LIMITS.SUMMARY_MAX} chars.`,
+      `Summary length (${summary.length}) exceeds max ${CV_LIMITS.SUMMARY_MAX} chars.`,
     );
+  } else if (!masterTemplate && summary.length === 0 && cv.experience.length === 0) {
+    errors.push('CV must contain either a summary or experience entries.');
+  } else if (masterTemplate && masterTemplate.summary.trim().length >= 40 && summary.length < 30) {
+    errors.push(`Summary length (${summary.length}) is too short.`);
   }
 
-  if (!Array.isArray(cv.experience) || cv.experience.length !== CV_LIMITS.EXPERIENCE_COUNT) {
-    errors.push(`Experience must contain exactly ${CV_LIMITS.EXPERIENCE_COUNT} roles.`);
+  if (!Array.isArray(cv.experience) || cv.experience.length === 0) {
+    errors.push('Experience must contain at least 1 role.');
+  } else if (masterTemplate && cv.experience.length !== masterTemplate.experience.length) {
+    errors.push(
+      `Experience count (${cv.experience.length}) must match Master CV (${masterTemplate.experience.length}).`,
+    );
   } else {
     cv.experience.forEach((role, idx) => {
-      const masterRole = MASTER_CV.experience[idx];
       if (!role.role || role.role.trim().length === 0 || role.role.length > CV_LIMITS.ROLE_MAX) {
         errors.push(`Experience[${idx}].role is invalid or exceeds ${CV_LIMITS.ROLE_MAX} chars.`);
       }
-      if (role.company !== masterRole.company) {
-        errors.push(
-          `Experience[${idx}].company ("${role.company}") does not match Master CV ("${masterRole.company}").`,
-        );
+      if (masterTemplate) {
+        const masterRole = masterTemplate.experience[idx];
+        if (masterRole && role.company !== masterRole.company) {
+          errors.push(
+            `Experience[${idx}].company ("${role.company}") does not match Master CV ("${masterRole.company}").`,
+          );
+        }
+        if (masterRole && role.period !== masterRole.period) {
+          errors.push(
+            `Experience[${idx}].period ("${role.period}") does not match Master CV ("${masterRole.period}").`,
+          );
+        }
       }
-      if (role.period !== masterRole.period) {
-        errors.push(
-          `Experience[${idx}].period ("${role.period}") does not match Master CV ("${masterRole.period}").`,
-        );
-      }
-      if (!Array.isArray(role.bullets) || role.bullets.length !== CV_LIMITS.BULLETS_PER_ROLE) {
-        errors.push(
-          `Experience[${idx}] must contain exactly ${CV_LIMITS.BULLETS_PER_ROLE} bullets.`,
-        );
+      if (!Array.isArray(role.bullets) || role.bullets.length === 0) {
+        errors.push(`Experience[${idx}] must contain at least 1 bullet.`);
       } else {
         role.bullets.forEach((b, bIdx) => {
           const trimmed = (b ?? '').trim();
-          if (trimmed.length < 20 || trimmed.length > CV_LIMITS.BULLET_MAX) {
+          if (trimmed.length < 12 || trimmed.length > CV_LIMITS.BULLET_MAX) {
             errors.push(
-              `Experience[${idx}].bullets[${bIdx}] length (${trimmed.length}) must be 20–${CV_LIMITS.BULLET_MAX} chars.`,
+              `Experience[${idx}].bullets[${bIdx}] length (${trimmed.length}) must be 12–${CV_LIMITS.BULLET_MAX} chars.`,
             );
           }
         });
@@ -143,8 +157,8 @@ export function validateTailoredCvContent(
     });
   }
 
-  if (!Array.isArray(cv.toolbox) || cv.toolbox.length !== CV_LIMITS.TOOLBOX_COUNT) {
-    errors.push(`Toolbox must contain exactly ${CV_LIMITS.TOOLBOX_COUNT} categories.`);
+  if (!Array.isArray(cv.toolbox) || cv.toolbox.length === 0) {
+    errors.push('Toolbox must contain at least 1 skill category.');
   } else {
     cv.toolbox.forEach((group, idx) => {
       const category = (group.category ?? '').trim();
@@ -159,24 +173,21 @@ export function validateTailoredCvContent(
     });
   }
 
-  if (
-    !Array.isArray(cv.education) ||
-    cv.education.length === 0 ||
-    cv.education.length > CV_LIMITS.EDUCATION_MAX_LINES
-  ) {
-    errors.push(`Education must contain 1–${CV_LIMITS.EDUCATION_MAX_LINES} lines.`);
-  } else {
-    const joinedEdu = cv.education.join(' ');
-    if (!/Ben-Gurion|Industrial Engineering/i.test(joinedEdu)) {
-      errors.push('Education must reference authentic Ben-Gurion / Industrial Engineering degree.');
-    }
+  if (!Array.isArray(cv.education) || cv.education.length === 0) {
+    errors.push('Education must contain at least 1 entry.');
+  } else if (cv.education.length > CV_LIMITS.EDUCATION_MAX_LINES) {
+    errors.push(`Education must not exceed ${CV_LIMITS.EDUCATION_MAX_LINES} lines.`);
   }
 
   const allTextFields: string[] = [
+    cv.name ?? '',
+    cv.title ?? '',
+    cv.contactLine ?? '',
     cv.summary ?? '',
     ...(cv.experience ?? []).flatMap((e) => [e.role ?? '', e.company ?? '', ...(e.bullets ?? [])]),
     ...(cv.toolbox ?? []).flatMap((t) => [t.category ?? '', t.items ?? '']),
     ...(cv.education ?? []),
+    ...(cv.extraSections ?? []).flatMap((s) => [s.title ?? '', ...(s.items ?? [])]),
   ];
 
   for (const field of allTextFields) {
@@ -214,39 +225,92 @@ export function validateTailoredCvContent(
 function trimCvSlightly(cv: TailoredCV, factor: number): TailoredCV {
   return {
     ...cv,
-    summary: truncateClean(cv.summary, Math.max(80, Math.floor(cv.summary.length * factor))),
+    summary: cv.summary
+      ? truncateClean(cv.summary, Math.max(80, Math.floor(cv.summary.length * factor)))
+      : '',
     experience: cv.experience.map((exp) => ({
       ...exp,
       bullets: exp.bullets.map((b) =>
         truncateClean(b, Math.max(45, Math.floor(b.length * factor))),
-      ) as [string, string, string],
-    })) as TailoredCV['experience'],
+      ),
+    })),
   };
 }
 
 export async function validateAndRenderCv(
   rawCv: TailoredCV,
   meta?: ValidatedCvMetadata,
+  options?: {
+    masterTemplate?: TailoredCV;
+    preserveUploadedShape?: boolean;
+  },
 ): Promise<{
   cv: TailoredCV;
   pdfBuffer: Buffer;
   byteLength: number;
   pageCount: number;
+  density: PdfDensity;
 }> {
-  let currentCv = sanitizeTailoredCV(rawCv);
-  const contentCheck = validateTailoredCvContent(currentCv, meta);
+  const preserveUploadedShape = Boolean(options?.preserveUploadedShape);
+  let currentCv = preserveUploadedShape
+    ? sanitizeUploadedMasterCv(rawCv)
+    : sanitizeTailoredCV(rawCv, options?.masterTemplate);
+
+  const contentCheck = validateTailoredCvContent(
+    currentCv,
+    meta,
+    preserveUploadedShape ? undefined : options?.masterTemplate,
+  );
   if (!contentCheck.valid) {
     throw new CvValidationError(contentCheck.errors);
   }
 
-  let pdfBuffer = await renderCvPdfBuffer(currentCv);
-  let binaryCheck = validatePdfBinary(pdfBuffer);
+  // First try progressively tighter densities to preserve 100% of user's wording
+  let chosenDensity: PdfDensity = 'normal';
+  let pdfBuffer: Buffer = Buffer.alloc(0);
+  let binaryCheck: PdfBinaryValidationResult = {
+    valid: false,
+    byteLength: 0,
+    pageCount: 0,
+    errors: [],
+  };
 
-  // Auto-trim and re-render up to 3 attempts if PDF somehow overflows beyond 1 page
-  for (let attempt = 0; attempt < 3 && binaryCheck.pageCount > CV_PDF_BOUNDS.REQUIRED_PAGES; attempt++) {
-    currentCv = trimCvSlightly(currentCv, 0.88);
-    pdfBuffer = await renderCvPdfBuffer(currentCv);
+  for (const density of DENSITY_ORDER) {
+    chosenDensity = density;
+    pdfBuffer = await renderCvPdfBuffer(currentCv, {
+      density,
+      masterTemplate: options?.masterTemplate,
+      preserveUploadedShape: true,
+    });
     binaryCheck = validatePdfBinary(pdfBuffer);
+    if (binaryCheck.valid) {
+      return {
+        cv: currentCv,
+        pdfBuffer,
+        byteLength: binaryCheck.byteLength,
+        pageCount: binaryCheck.pageCount,
+        density: chosenDensity,
+      };
+    }
+    if (binaryCheck.pageCount <= CV_PDF_BOUNDS.REQUIRED_PAGES) {
+      break;
+    }
+  }
+
+  // Only if 'tight' density still overflows beyond 1 page, trim text gently up to 3 attempts
+  for (
+    let attempt = 0;
+    attempt < 3 && binaryCheck.pageCount > CV_PDF_BOUNDS.REQUIRED_PAGES;
+    attempt++
+  ) {
+    currentCv = trimCvSlightly(currentCv, 0.88);
+    pdfBuffer = await renderCvPdfBuffer(currentCv, {
+      density: 'tight',
+      masterTemplate: options?.masterTemplate,
+      preserveUploadedShape: true,
+    });
+    binaryCheck = validatePdfBinary(pdfBuffer);
+    chosenDensity = 'tight';
   }
 
   if (!binaryCheck.valid) {
@@ -258,5 +322,6 @@ export async function validateAndRenderCv(
     pdfBuffer,
     byteLength: binaryCheck.byteLength,
     pageCount: binaryCheck.pageCount,
+    density: chosenDensity,
   };
 }
