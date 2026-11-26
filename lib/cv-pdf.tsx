@@ -12,9 +12,9 @@ import { sanitizeTailoredCV, sanitizeUploadedMasterCv } from './cv-schema';
 import { MASTER_CV } from './master-cv';
 import type { TailoredCV } from './types';
 
-export type PdfDensity = 'normal' | 'compact' | 'tight';
+export type PdfDensity = 'normal' | 'compact' | 'tight' | 'ultra';
 
-const NAVY = '#003366';
+const DEFAULT_NAVY = '#003366';
 const INK = '#0f172a';
 const BODY = '#1e293b';
 const MUTED = '#475569';
@@ -74,9 +74,22 @@ const DENSITY_CONFIGS: Record<PdfDensity, DensityConfig> = {
     bulletGap: 1.1,
     toolboxWidth: 116,
   },
+  ultra: {
+    padding: 18,
+    baseFont: 7.5,
+    nameSize: 15,
+    headlineSize: 8.2,
+    contactSize: 7.3,
+    sectionTitleSize: 8,
+    lineHeight: 1.14,
+    sectionGap: 3.8,
+    roleGap: 2.8,
+    bulletGap: 0.8,
+    toolboxWidth: 110,
+  },
 };
 
-function createDensityStyles(density: PdfDensity) {
+function createDensityStyles(density: PdfDensity, accentColor: string) {
   const cfg = DENSITY_CONFIGS[density];
   return StyleSheet.create({
     page: {
@@ -93,14 +106,14 @@ function createDensityStyles(density: PdfDensity) {
     },
     header: {
       marginBottom: cfg.sectionGap + 1,
-      paddingBottom: 6,
+      paddingBottom: 5,
       borderBottomWidth: 1.5,
-      borderBottomColor: NAVY,
+      borderBottomColor: accentColor,
     },
     name: {
       fontFamily: 'Helvetica-Bold',
       fontSize: cfg.nameSize,
-      color: NAVY,
+      color: accentColor,
       letterSpacing: 0.35,
       marginBottom: 4,
     },
@@ -120,12 +133,16 @@ function createDensityStyles(density: PdfDensity) {
     contactItem: {
       color: MUTED,
     },
+    contactHeadline: {
+      fontFamily: 'Helvetica-Bold',
+      color: INK,
+    },
     contactLink: {
-      color: NAVY,
+      color: accentColor,
       textDecoration: 'underline',
     },
     contactSep: {
-      marginHorizontal: 5,
+      marginHorizontal: 4.5,
       color: '#94a3b8',
     },
     section: {
@@ -134,7 +151,7 @@ function createDensityStyles(density: PdfDensity) {
     sectionTitle: {
       fontFamily: 'Helvetica-Bold',
       fontSize: cfg.sectionTitleSize,
-      color: NAVY,
+      color: accentColor,
       textTransform: 'uppercase',
       letterSpacing: 0.75,
       paddingBottom: 2,
@@ -154,7 +171,7 @@ function createDensityStyles(density: PdfDensity) {
       flexDirection: 'row',
       justifyContent: 'space-between',
       alignItems: 'baseline',
-      marginBottom: 1.8,
+      marginBottom: 1.6,
     },
     roleLeft: {
       flexDirection: 'row',
@@ -169,7 +186,7 @@ function createDensityStyles(density: PdfDensity) {
     roleCompany: {
       fontFamily: 'Helvetica',
       fontSize: cfg.baseFont + 0.2,
-      color: NAVY,
+      color: accentColor,
     },
     rolePeriod: {
       fontFamily: 'Helvetica-Bold',
@@ -185,7 +202,7 @@ function createDensityStyles(density: PdfDensity) {
     bulletMark: {
       width: 9,
       fontSize: cfg.baseFont,
-      color: NAVY,
+      color: accentColor,
       fontFamily: 'Helvetica-Bold',
     },
     bulletText: {
@@ -196,7 +213,7 @@ function createDensityStyles(density: PdfDensity) {
     },
     toolboxRow: {
       flexDirection: 'row',
-      marginBottom: cfg.bulletGap + 0.5,
+      marginBottom: cfg.bulletGap + 0.4,
       alignItems: 'flex-start',
     },
     toolboxCategory: {
@@ -222,23 +239,32 @@ function createDensityStyles(density: PdfDensity) {
       color: BODY,
       lineHeight: cfg.lineHeight,
     },
+    eduBoldLabel: {
+      fontFamily: 'Helvetica-Bold',
+      color: INK,
+    },
   });
 }
 
 function renderContactTokens(
   contactLine: string,
   styles: ReturnType<typeof createDensityStyles>,
+  prefixTitle?: string,
 ) {
   const parts = contactLine
     .split(/\s*\|\s*/)
     .map((p) => p.trim())
     .filter(Boolean);
 
-  return parts.map((part, idx) => {
-    const isLast = idx === parts.length - 1;
+  const tokens = prefixTitle ? [prefixTitle, ...parts] : parts;
+
+  return tokens.map((part, idx) => {
+    const isLast = idx === tokens.length - 1;
     let node: React.ReactNode;
 
-    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(part)) {
+    if (prefixTitle && idx === 0) {
+      node = <Text style={styles.contactHeadline}>{part}</Text>;
+    } else if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(part)) {
       node = (
         <Link src={`mailto:${part}`} style={styles.contactLink}>
           {part}
@@ -263,6 +289,24 @@ function renderContactTokens(
   });
 }
 
+function renderEducationLine(
+  line: string,
+  styles: ReturnType<typeof createDensityStyles>,
+) {
+  const colonIdx = line.indexOf(':');
+  if (colonIdx > 0 && colonIdx < 38) {
+    const label = line.slice(0, colonIdx + 1);
+    const rest = line.slice(colonIdx + 1);
+    return (
+      <Text style={styles.eduText}>
+        <Text style={styles.eduBoldLabel}>{label}</Text>
+        {rest}
+      </Text>
+    );
+  }
+  return <Text style={styles.eduText}>{line}</Text>;
+}
+
 function TailoredCvDocument({
   cv,
   density,
@@ -270,9 +314,83 @@ function TailoredCvDocument({
   cv: TailoredCV;
   density: PdfDensity;
 }) {
-  const styles = createDensityStyles(density);
+  const accentColor =
+    cv.layout?.accentColor && /^#[0-9A-Fa-f]{6}$/.test(cv.layout.accentColor)
+      ? cv.layout.accentColor
+      : DEFAULT_NAVY;
+
+  const styles = createDensityStyles(density, accentColor);
   const displayName = cv.name || MASTER_CV.name;
   const displayTitle = cv.title || MASTER_CV.title;
+  const inlineHeader = Boolean(cv.layout?.inlineHeaderContact && cv.contactLine);
+  const showSummaryHeading = cv.layout?.hasSummaryHeading ?? true;
+  const sectionOrder = cv.layout?.sectionOrder ?? [
+    'experience',
+    'toolbox',
+    'education',
+  ];
+
+  const renderSection = (key: 'experience' | 'education' | 'toolbox') => {
+    if (key === 'experience' && cv.experience.length > 0) {
+      return (
+        <View key="experience" style={styles.section}>
+          <Text style={styles.sectionTitle}>Professional Experience</Text>
+          {cv.experience.map((item, idx) => (
+            <View key={`${item.company}-${idx}`} style={styles.roleBlock} wrap={false}>
+              <View style={styles.roleHeader}>
+                <View style={styles.roleLeft}>
+                  <Text style={styles.roleTitle}>{item.role}</Text>
+                  {item.company ? (
+                    <Text style={styles.roleCompany}>{` — ${item.company}`}</Text>
+                  ) : null}
+                </View>
+                {item.period ? <Text style={styles.rolePeriod}>{item.period}</Text> : null}
+              </View>
+              {item.bullets.map((bullet, bIdx) => (
+                <View key={bIdx} style={styles.bulletRow}>
+                  <Text style={styles.bulletMark}>•</Text>
+                  <Text style={styles.bulletText}>{bullet}</Text>
+                </View>
+              ))}
+            </View>
+          ))}
+        </View>
+      );
+    }
+
+    if (key === 'toolbox' && cv.toolbox.length > 0) {
+      return (
+        <View key="toolbox" style={styles.section} wrap={false}>
+          <Text style={styles.sectionTitle}>Technical Toolbox</Text>
+          {cv.toolbox.map((group, idx) => (
+            <View key={`${group.category}-${idx}`} style={styles.toolboxRow}>
+              <Text style={styles.toolboxCategory}>{`${group.category}:`}</Text>
+              <Text style={styles.toolboxItems}>{group.items}</Text>
+            </View>
+          ))}
+        </View>
+      );
+    }
+
+    if (key === 'education' && cv.education.length > 0) {
+      return (
+        <View key="education" style={styles.section} wrap={false}>
+          <Text style={styles.sectionTitle}>Education</Text>
+          {cv.education.map((edu, idx) => {
+            const hasBoldLabel = edu.indexOf(':') > 0 && edu.indexOf(':') < 38;
+            return (
+              <View key={idx} style={styles.eduRow}>
+                {!hasBoldLabel && <Text style={styles.bulletMark}>•</Text>}
+                {renderEducationLine(edu, styles)}
+              </View>
+            );
+          })}
+        </View>
+      );
+    }
+
+    return null;
+  };
 
   return (
     <Document
@@ -284,10 +402,16 @@ function TailoredCvDocument({
         {/* Header */}
         <View style={styles.header} wrap={false}>
           <Text style={styles.name}>{displayName}</Text>
-          {displayTitle ? <Text style={styles.headline}>{displayTitle}</Text> : null}
+          {!inlineHeader && displayTitle ? (
+            <Text style={styles.headline}>{displayTitle}</Text>
+          ) : null}
           <View style={styles.contactRow}>
             {cv.contactLine ? (
-              renderContactTokens(cv.contactLine, styles)
+              renderContactTokens(
+                cv.contactLine,
+                styles,
+                inlineHeader ? displayTitle : undefined,
+              )
             ) : (
               <>
                 <Text style={styles.contactItem}>{MASTER_CV.contact.location}</Text>
@@ -318,65 +442,18 @@ function TailoredCvDocument({
           </View>
         </View>
 
-        {/* Professional Summary */}
+        {/* Summary (with or without heading matching user's template) */}
         {cv.summary ? (
           <View style={styles.section} wrap={false}>
-            <Text style={styles.sectionTitle}>Professional Summary</Text>
+            {showSummaryHeading && (
+              <Text style={styles.sectionTitle}>Professional Summary</Text>
+            )}
             <Text style={styles.summaryText}>{cv.summary}</Text>
           </View>
         ) : null}
 
-        {/* Professional Experience */}
-        {cv.experience.length > 0 ? (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Professional Experience</Text>
-            {cv.experience.map((item, idx) => (
-              <View key={`${item.company}-${idx}`} style={styles.roleBlock} wrap={false}>
-                <View style={styles.roleHeader}>
-                  <View style={styles.roleLeft}>
-                    <Text style={styles.roleTitle}>{item.role}</Text>
-                    {item.company ? (
-                      <Text style={styles.roleCompany}>{` — ${item.company}`}</Text>
-                    ) : null}
-                  </View>
-                  {item.period ? <Text style={styles.rolePeriod}>{item.period}</Text> : null}
-                </View>
-                {item.bullets.map((bullet, bIdx) => (
-                  <View key={bIdx} style={styles.bulletRow}>
-                    <Text style={styles.bulletMark}>•</Text>
-                    <Text style={styles.bulletText}>{bullet}</Text>
-                  </View>
-                ))}
-              </View>
-            ))}
-          </View>
-        ) : null}
-
-        {/* Technical Toolbox */}
-        {cv.toolbox.length > 0 ? (
-          <View style={styles.section} wrap={false}>
-            <Text style={styles.sectionTitle}>Technical Toolbox</Text>
-            {cv.toolbox.map((group, idx) => (
-              <View key={`${group.category}-${idx}`} style={styles.toolboxRow}>
-                <Text style={styles.toolboxCategory}>{`${group.category}:`}</Text>
-                <Text style={styles.toolboxItems}>{group.items}</Text>
-              </View>
-            ))}
-          </View>
-        ) : null}
-
-        {/* Education */}
-        {cv.education.length > 0 ? (
-          <View style={styles.section} wrap={false}>
-            <Text style={styles.sectionTitle}>Education</Text>
-            {cv.education.map((edu, idx) => (
-              <View key={idx} style={styles.eduRow}>
-                <Text style={styles.bulletMark}>•</Text>
-                <Text style={styles.eduText}>{edu}</Text>
-              </View>
-            ))}
-          </View>
-        ) : null}
+        {/* Ordered Main Sections */}
+        {sectionOrder.map((secKey) => renderSection(secKey))}
 
         {/* Extra Sections (Languages, Military Service, Projects, etc.) */}
         {(cv.extraSections ?? []).map((sec, idx) => (

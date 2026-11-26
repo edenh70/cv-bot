@@ -22,7 +22,7 @@ import { DEFAULT_GOOGLE_SHEET_URL } from '@/lib/google-sheet';
 import type {
   JobRecord,
   JobStatus,
-  MasterCvProfileRecord,
+  MasterCvProfilePublic,
   ScanResultSummary,
   SourceRecord,
   TailoredCV,
@@ -42,7 +42,8 @@ export function DashboardShell() {
   const [sources, setSources] = useState<SourceRecord[]>([]);
   const [sheetUrl, setSheetUrl] = useState<string>(DEFAULT_GOOGLE_SHEET_URL);
   const [hasCustomCv, setHasCustomCv] = useState(false);
-  const [masterProfile, setMasterProfile] = useState<MasterCvProfileRecord | null>(null);
+  const [hasOriginalDocx, setHasOriginalDocx] = useState(false);
+  const [masterProfile, setMasterProfile] = useState<MasterCvProfilePublic | null>(null);
   const [masterTemplate, setMasterTemplate] = useState<TailoredCV | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -98,6 +99,7 @@ export function DashboardShell() {
       if (masterRes.ok) {
         const masterData = await masterRes.json();
         setHasCustomCv(Boolean(masterData.hasCustomCv));
+        setHasOriginalDocx(Boolean(masterData.hasOriginalDocx));
         setMasterProfile(masterData.profile ?? null);
         setMasterTemplate(masterData.template ?? null);
       }
@@ -382,13 +384,17 @@ export function DashboardShell() {
                   )}
                 </form>
 
-                {!hasCustomCv && (
+                {!hasOriginalDocx && (
                   <button
                     type="button"
                     onClick={() => setActiveTab('sources')}
                     className="flex w-full items-center justify-between rounded-xl border border-amber-200 bg-amber-50/80 px-3.5 py-2.5 text-left text-xs font-medium text-amber-800 transition hover:bg-amber-100 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-300"
                   >
-                    <span>Using default profile. Upload your actual CV template for surgical tailoring.</span>
+                    <span>
+                      {hasCustomCv
+                        ? 'Re-upload your .docx CV once to unlock exact original Word formatting.'
+                        : 'Using default profile. Upload your actual .docx CV for exact formatting.'}
+                    </span>
                     <span className="ml-2 shrink-0 font-bold underline">Upload &rarr;</span>
                   </button>
                 )}
@@ -429,6 +435,7 @@ export function DashboardShell() {
                     <JobCard
                       key={job.id}
                       job={job}
+                      hasOriginalDocx={hasOriginalDocx}
                       onStatusChange={handleStatusChange}
                       onJobUpdated={(updatedJob) => {
                         setJobs((prev) =>
@@ -447,10 +454,12 @@ export function DashboardShell() {
                 sources={sources}
                 sheetUrl={sheetUrl}
                 hasCustomCv={hasCustomCv}
+                hasOriginalDocx={hasOriginalDocx}
                 masterProfile={masterProfile}
                 masterTemplate={masterTemplate}
                 onMasterCvUpdated={(payload) => {
                   setHasCustomCv(payload.hasCustomCv);
+                  setHasOriginalDocx(payload.hasOriginalDocx);
                   setMasterProfile(payload.profile);
                   setMasterTemplate(payload.template);
                   showToast(
@@ -477,6 +486,7 @@ export function DashboardShell() {
                 </h2>
                 <AppliedHistoryTab
                   jobs={appliedJobs}
+                  hasOriginalDocx={hasOriginalDocx}
                   onStatusChange={handleStatusChange}
                 />
               </div>

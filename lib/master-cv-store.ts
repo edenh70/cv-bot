@@ -1,10 +1,28 @@
 import { getDefaultMasterCvTemplate } from './master-cv';
 import { getSupabaseAdmin } from './supabase';
-import type { MasterCvProfileRecord, TailoredCV } from './types';
+import type {
+  MasterCvProfilePublic,
+  MasterCvProfileRecord,
+  TailoredCV,
+} from './types';
 
 const DEFAULT_PROFILE_ID = 'default';
 
 export { getDefaultMasterCvTemplate };
+
+export function toPublicMasterCvProfile(
+  profile: MasterCvProfileRecord | null,
+): MasterCvProfilePublic | null {
+  if (!profile) return null;
+  return {
+    id: profile.id,
+    filename: profile.filename,
+    raw_text: profile.raw_text,
+    structured_json: profile.structured_json,
+    hasOriginalDocx: Boolean(profile.original_file_base64),
+    updated_at: profile.updated_at,
+  };
+}
 
 export async function getActiveMasterCv(): Promise<{
   template: TailoredCV;
@@ -39,6 +57,8 @@ export async function saveMasterCvProfile(params: {
   filename: string;
   rawText: string;
   structured: TailoredCV;
+  originalFileBase64?: string | null;
+  originalMimeType?: string | null;
 }): Promise<MasterCvProfileRecord> {
   const supabase = getSupabaseAdmin();
   const { data, error } = await supabase
@@ -49,6 +69,8 @@ export async function saveMasterCvProfile(params: {
         filename: params.filename,
         raw_text: params.rawText,
         structured_json: params.structured,
+        original_file_base64: params.originalFileBase64 ?? null,
+        original_mime_type: params.originalMimeType ?? null,
         updated_at: new Date().toISOString(),
       },
       { onConflict: 'id' },

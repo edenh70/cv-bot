@@ -11,21 +11,24 @@ import {
   ChevronDown,
   ChevronUp,
 } from 'lucide-react';
-import type { MasterCvProfileRecord, TailoredCV } from '@/lib/types';
+import type { MasterCvProfilePublic, TailoredCV } from '@/lib/types';
 
 interface MasterCvCardProps {
   hasCustomCv: boolean;
-  profile: MasterCvProfileRecord | null;
+  hasOriginalDocx: boolean;
+  profile: MasterCvProfilePublic | null;
   template: TailoredCV | null;
   onUpdated: (payload: {
     hasCustomCv: boolean;
-    profile: MasterCvProfileRecord | null;
+    hasOriginalDocx: boolean;
+    profile: MasterCvProfilePublic | null;
     template: TailoredCV;
   }) => void;
 }
 
 export function MasterCvCard({
   hasCustomCv,
+  hasOriginalDocx,
   profile,
   template,
   onUpdated,
@@ -61,10 +64,11 @@ export function MasterCvCard({
       }
 
       setSuccessMsg(
-        `Saved "${file.name}" (${data.pageCount}-page verified, ${data.density} layout).`,
+        `Saved "${file.name}" (${data.pageCount}-page verified${data.hasOriginalDocx ? ', exact Word template preserved' : ''}).`,
       );
       onUpdated({
         hasCustomCv: true,
+        hasOriginalDocx: Boolean(data.hasOriginalDocx),
         profile: data.profile,
         template: data.template,
       });
@@ -91,6 +95,7 @@ export function MasterCvCard({
       setSuccessMsg('Reset to built-in default profile.');
       onUpdated({
         hasCustomCv: false,
+        hasOriginalDocx: false,
         profile: null,
         template: data.template,
       });
@@ -111,12 +116,18 @@ export function MasterCvCard({
           <div className="flex items-center gap-2">
             <span
               className={`inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
-                hasCustomCv
+                hasOriginalDocx
                   ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/70 dark:text-emerald-300'
-                  : 'bg-amber-100 text-amber-800 dark:bg-amber-950/70 dark:text-amber-300'
+                  : hasCustomCv
+                    ? 'bg-sky-100 text-sky-800 dark:bg-sky-950/70 dark:text-sky-300'
+                    : 'bg-amber-100 text-amber-800 dark:bg-amber-950/70 dark:text-amber-300'
               }`}
             >
-              {hasCustomCv ? 'Your Uploaded CV' : 'Default Template'}
+              {hasOriginalDocx
+                ? 'Exact .docx Template Active'
+                : hasCustomCv
+                  ? 'Custom CV Active'
+                  : 'Default Template'}
             </span>
           </div>
           <h2 className="mt-1.5 text-sm font-bold text-slate-900 dark:text-white">
@@ -125,8 +136,13 @@ export function MasterCvCard({
           <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
             {hasCustomCv && profile
               ? `${profile.filename} · ${roleCount} roles · ${toolboxCount} skill groups`
-              : 'Upload your real CV (.pdf, .docx, .txt). Light-touch tailoring keeps your structure & wording intact.'}
+              : 'Upload your real .docx CV. Your exact Word formatting stays untouched; only tailored text changes.'}
           </p>
+          {hasCustomCv && !hasOriginalDocx && (
+            <p className="mt-1 text-[11px] font-medium text-amber-700 dark:text-amber-300">
+              Re-upload your .docx file once to enable exact original Word file downloads.
+            </p>
+          )}
         </div>
       </div>
 
@@ -160,8 +176,18 @@ export function MasterCvCard({
           className="flex h-11 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
         >
           <FileText className="h-4 w-4" />
-          <span>Preview</span>
+          <span>Preview PDF</span>
         </a>
+
+        {hasOriginalDocx && (
+          <a
+            href="/api/master-cv/preview?format=docx"
+            className="flex h-11 items-center justify-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-950"
+          >
+            <FileText className="h-4 w-4" />
+            <span>Original .docx</span>
+          </a>
+        )}
 
         {hasCustomCv && (
           <button

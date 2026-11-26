@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { isAuthenticated } from '@/lib/auth';
 import { CvValidationError, validateAndRenderCv } from '@/lib/cv-validator';
+import { patchDocxWithTailoredCv } from '@/lib/docx-template';
+import { getActiveMasterCv } from '@/lib/master-cv-store';
 import { getSupabaseAdmin } from '@/lib/supabase';
 import type { TailoredCV } from '@/lib/types';
 
@@ -41,15 +43,56 @@ export async function GET(
       return NextResponse.json({ error: 'Job not found.' }, { status: 404 });
     }
 
-    const { pdfBuffer } = await validateAndRenderCv(
-      job.tailored_cv_json as TailoredCV,
-      undefined,
-      { preserveUploadedShape: true },
-    );
-    const safeCompany = sanitizeFilenameSegment(job.company);
-    const filename = `Eden_Hadad_CV_${safeCompany}.pdf`;
-
     const { searchParams } = new URL(request.url);
+    const format = searchParams.get('format');
+    const safeCompany = sanitizeFilenameSegment(job.company);
+
+    if (format === 'docx') {
+      const { template, profile } = await getActiveMasterCv();
+      if (!profile?.original_file_base64) {
+        return NextResponse.json(
+          {
+            error:
+              'Upload a .docx Master CV first to download in exact Word format.',
+          },
+          { status: 400 },
+        );
+      }
+
+      const originalBuffer = Buffer.from(
+        profile.original_file_base64,
+        'base64',
+      );
+      const patchedDocx = await patchDocxWithTailoredCv(
+        originalBuffer,
+        template,
+        job.tailored_cv_json as TailoredCV,
+      );
+
+      return new Response(new Uint8Array(patchedDocx), {
+        status: 200,
+        headers: {
+          'Content-Type':
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          'Content-Disposition': `attachment; filename="Eden_Hadad_CV_${safeCompany}.docx"`,
+          'Cache-Control': 'private, no-store',
+        },
+      });
+    }
+
+    const storedCv = job.tailored_cv_json as TailoredCV;
+    let cvToRender = storedCv;
+    if (!storedCv.layout) {
+      const { template } = await getActiveMasterCv();
+      if (template.layout) {
+        cvToRender = { ...storedCv, layout: template.layout };
+      }
+    }
+
+    const { pdfBuffer } = await validateAndRenderCv(cvToRender, undefined, {
+      preserveUploadedShape: true,
+    });
+    const filename = `Eden_Hadad_CV_${safeCompany}.pdf`;
     const isDownload = searchParams.get('download') === '1';
     const disposition = isDownload ? 'attachment' : 'inline';
 
@@ -66,7 +109,7 @@ export async function GET(
     const message =
       error instanceof CvValidationError
         ? error.message
-        : 'Failed to generate CV PDF.';
+        : 'Failed to generate CV file.';
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

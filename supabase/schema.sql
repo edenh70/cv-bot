@@ -47,6 +47,8 @@ create table if not exists public.master_cv_profile (
   filename text not null,
   raw_text text not null,
   structured_json jsonb not null,
+  original_file_base64 text,
+  original_mime_type text,
   updated_at timestamptz not null default now()
 );
 

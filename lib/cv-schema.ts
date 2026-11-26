@@ -8,24 +8,24 @@ import type {
 } from './types';
 
 export const CV_LIMITS = {
-  SUMMARY_MAX: 420,
+  SUMMARY_MAX: 550,
   EXPERIENCE_COUNT: 3,
   MAX_EXPERIENCE_ROLES: 6,
   BULLETS_PER_ROLE: 3,
   MAX_BULLETS_PER_ROLE: 6,
-  BULLET_MAX: 185,
-  ROLE_MAX: 75,
-  COMPANY_MAX: 80,
-  PERIOD_MAX: 45,
+  BULLET_MAX: 320,
+  ROLE_MAX: 100,
+  COMPANY_MAX: 100,
+  PERIOD_MAX: 50,
   TOOLBOX_COUNT: 4,
   MAX_TOOLBOX_CATEGORIES: 6,
-  TOOLBOX_LINE_MAX: 145,
-  TOOLBOX_CATEGORY_MAX: 32,
-  EDUCATION_MAX_LINES: 4,
-  EDUCATION_LINE_MAX: 130,
+  TOOLBOX_LINE_MAX: 320,
+  TOOLBOX_CATEGORY_MAX: 40,
+  EDUCATION_MAX_LINES: 5,
+  EDUCATION_LINE_MAX: 220,
   MAX_EXTRA_SECTIONS: 3,
   EXTRA_SECTION_ITEMS_MAX: 6,
-  EXTRA_SECTION_ITEM_MAX: 145,
+  EXTRA_SECTION_ITEM_MAX: 220,
 } as const;
 
 export const jobExtractionCandidateSchema = z.object({
@@ -70,6 +70,16 @@ export const tailoredCVRawSchema = z.object({
         items: z.array(z.string()).default([]),
       }),
     )
+    .optional(),
+  layout: z
+    .object({
+      sectionOrder: z
+        .array(z.enum(['experience', 'education', 'toolbox']))
+        .optional(),
+      hasSummaryHeading: z.boolean().optional(),
+      accentColor: z.string().optional(),
+      inlineHeaderContact: z.boolean().optional(),
+    })
     .optional(),
 });
 
@@ -219,6 +229,7 @@ export function sanitizeTailoredCV(
   const extraSections = sanitizeExtraSections(
     masterTemplate.extraSections ?? input.extraSections,
   );
+  const layout = masterTemplate.layout ?? input.layout;
 
   return {
     ...(masterTemplate.name ? { name: truncateClean(masterTemplate.name, 70) } : {}),
@@ -231,6 +242,7 @@ export function sanitizeTailoredCV(
     toolbox,
     education,
     ...(extraSections ? { extraSections } : {}),
+    ...(layout ? { layout } : {}),
   };
 }
 
@@ -299,5 +311,6 @@ export function sanitizeUploadedMasterCv(raw: unknown): TailoredCV {
     toolbox,
     education,
     ...(extraSections ? { extraSections } : {}),
+    ...(input.layout ? { layout: input.layout } : {}),
   };
 }

@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import {
   FileText,
+  Download,
   ExternalLink,
   RotateCcw,
   CheckCircle2,
@@ -13,6 +14,7 @@ import type { JobRecord, JobStatus } from '@/lib/types';
 
 interface AppliedHistoryTabProps {
   jobs: JobRecord[];
+  hasOriginalDocx?: boolean;
   onStatusChange: (jobId: string, status: JobStatus) => Promise<void>;
 }
 
@@ -31,6 +33,7 @@ function formatAppliedDate(iso: string | null, fallbackIso: string): string {
 
 export function AppliedHistoryTab({
   jobs,
+  hasOriginalDocx = false,
   onStatusChange,
 }: AppliedHistoryTabProps) {
   const [restoringId, setRestoringId] = useState<string | null>(null);
@@ -89,14 +92,27 @@ export function AppliedHistoryTab({
           </div>
 
           <div className="mt-3 flex items-center gap-2">
+            {hasOriginalDocx && (
+              <a
+                href={`/api/cv/${job.id}?format=docx`}
+                className="flex h-10 flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#003366] px-3 text-xs font-semibold text-white transition hover:bg-[#004080] dark:bg-sky-600 dark:hover:bg-sky-500"
+              >
+                <Download className="h-3.5 w-3.5" />
+                <span>Sent .docx</span>
+              </a>
+            )}
             <a
               href={`/api/cv/${job.id}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="flex h-10 flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#003366] px-3 text-xs font-semibold text-white transition hover:bg-[#004080] dark:bg-sky-600 dark:hover:bg-sky-500"
+              className={`flex h-10 flex-1 items-center justify-center gap-1.5 rounded-xl px-3 text-xs font-semibold transition ${
+                hasOriginalDocx
+                  ? 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200'
+                  : 'bg-[#003366] text-white hover:bg-[#004080] dark:bg-sky-600 dark:hover:bg-sky-500'
+              }`}
             >
               <FileText className="h-3.5 w-3.5" />
-              <span>View Sent PDF</span>
+              <span>{hasOriginalDocx ? 'PDF' : 'View Sent PDF'}</span>
             </a>
 
             <a

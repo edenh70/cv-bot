@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import JSZip from 'jszip';
+import mammoth from 'mammoth';
 import { CV_LIMITS, sanitizeTailoredCV } from '../lib/cv-schema';
+import { extractDocxInfo, patchDocxWithTailoredCv } from '../lib/docx-template';
 import {
   CV_PDF_BOUNDS,
   CvValidationError,
@@ -254,4 +257,87 @@ test('custom uploaded 4-role CV with extraSections renders strictly 1 page via d
   const check = validateTailoredCvContent(tampered, undefined, customMaster);
   assert.equal(check.valid, false);
   assert.ok(check.errors.some((e) => e.includes('does not match Master CV')));
+});
+
+test('DOCX engine preserves original Word XML, hyperlinks, bold prefixes, and section order while surgically replacing text', async () => {
+  const originalSummary =
+    'Data Analyst with a B.Sc. in Industrial Engineering and 5+ years of experience driving product optimization and revenue growth.';
+  const originalBullet =
+    'Built Tableau/Power BI dashboards, custom analytics tools, and XGBoost churn/LTV models for clients, automating SQL reporting and lifting conversions by up to 18%.';
+  const originalToolboxItems =
+    'SQL (PostgreSQL, BigQuery), Excel, Tableau, Power BI, A/B Testing, Statistics.';
+
+  const docXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p><w:pPr><w:jc w:val="left"/></w:pPr><w:r><w:rPr><w:color w:val="1B4965"/><w:b/></w:rPr><w:t>Eden Hadad</w:t></w:r></w:p>
+    <w:p><w:r><w:t>Senior Data Analyst | Giv'atayim, Israel | edenhadad70@gmail.com | </w:t></w:r><w:hyperlink r:id="rId1"><w:r><w:t>LinkedIn</w:t></w:r></w:hyperlink></w:p>
+    <w:p><w:r><w:t>${originalSummary}</w:t></w:r></w:p>
+    <w:p><w:r><w:rPr><w:b/></w:rPr><w:t>PROFESSIONAL EXPERIENCE</w:t></w:r></w:p>
+    <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:t>${originalBullet}</w:t></w:r></w:p>
+    <w:p><w:r><w:rPr><w:b/></w:rPr><w:t>EDUCATION</w:t></w:r></w:p>
+    <w:p><w:r><w:t>B.Sc. Industrial Engineering &amp; Management | Ben-Gurion University (2016–2020)</w:t></w:r></w:p>
+    <w:p><w:r><w:rPr><w:b/></w:rPr><w:t>TECHNICAL TOOLBOX</w:t></w:r></w:p>
+    <w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Analytics &amp; BI:</w:t></w:r><w:r><w:rPr><w:sz w:val="19"/></w:rPr><w:t> ${originalToolboxItems}</w:t></w:r></w:p>
+  </w:body>
+</w:document>`;
+
+  const zip = new JSZip();
+  zip.file('word/document.xml', docXml);
+  const originalBuf = await zip.generateAsync({ type: 'nodebuffer' });
+
+  const info = await extractDocxInfo(originalBuf);
+  assert.deepEqual(info.layout.sectionOrder, ['experience', 'education', 'toolbox']);
+  assert.equal(info.layout.hasSummaryHeading, false);
+  assert.equal(info.layout.accentColor, '#1B4965');
+  assert.equal(info.layout.inlineHeaderContact, true);
+
+  const master: TailoredCV = {
+    name: 'Eden Hadad',
+    title: 'Senior Data Analyst',
+    contactLine: "Giv'atayim, Israel | edenhadad70@gmail.com | LinkedIn",
+    summary: originalSummary,
+    experience: [
+      {
+        role: 'Senior Data & AI Analyst',
+        company: 'Independent Consultant',
+        period: 'Mar 2023 – Present',
+        bullets: [originalBullet],
+      },
+    ],
+    education: ['B.Sc. Industrial Engineering & Management | Ben-Gurion University (2016–2020)'],
+    toolbox: [{ category: 'Analytics & BI', items: originalToolboxItems }],
+    layout: info.layout,
+  };
+
+  const tailored: TailoredCV = {
+    ...structuredClone(master),
+    summary:
+      'Data Analyst with a B.Sc. in Industrial Engineering and 5+ years of experience driving SaaS product funnels and revenue growth.',
+    toolbox: [
+      {
+        category: 'Analytics & BI',
+        items: 'A/B Testing, SQL (PostgreSQL, BigQuery), Tableau, Power BI, Excel.',
+      },
+    ],
+  };
+
+  const patchedBuf = await patchDocxWithTailoredCv(originalBuf, master, tailored);
+  const patchedZip = await JSZip.loadAsync(patchedBuf);
+  const patchedXml = await patchedZip.file('word/document.xml')!.async('string');
+
+  assert.ok(patchedXml.includes('<w:hyperlink r:id="rId1">'));
+  assert.ok(patchedXml.includes('<w:numId w:val="1"/>'));
+  assert.ok(patchedXml.includes('driving SaaS product funnels'));
+  assert.ok(patchedXml.includes('<w:rPr><w:b/></w:rPr><w:t xml:space="preserve">Analytics &amp; BI:</w:t>'));
+
+  const mammothText = (await mammoth.extractRawText({ buffer: patchedBuf })).value;
+  assert.ok(mammothText.includes('driving SaaS product funnels'));
+  assert.ok(mammothText.includes(originalBullet));
+
+  // Verify Eden-scale full CV renders strictly 1 page in PDF with layout order preserved
+  const renderedPdf = await validateAndRenderCv(tailored, undefined, {
+    preserveUploadedShape: true,
+  });
+  assert.equal(renderedPdf.pageCount, 1);
 });

@@ -1,5 +1,6 @@
 import { GoogleGenAI, Type, type GenerateContentConfig, type Part } from '@google/genai';
 import mammoth from 'mammoth';
+import { extractDocxInfo, type DocxLayoutMeta } from './docx-template';
 import { getDefaultMasterCvTemplate, MASTER_CV } from './master-cv';
 import {
   CV_LIMITS,
@@ -240,21 +241,22 @@ export async function parseUploadedCvToTemplate(params: {
     ext === 'docx';
 
   let extractedText = '';
+  let docxLayout: DocxLayoutMeta | undefined;
   const contentParts: Part[] = [];
 
   const extractionInstruction = [
-    `You are a strict verbatim resume parser. Extract the user's uploaded CV into structured JSON WITHOUT rewriting, summarizing, inventing, or dropping any authentic details.`,
+    `You are a strict verbatim resume parser. Extract the user's uploaded CV into structured JSON WITHOUT rewriting, summarizing, inventing, shortening, or dropping ANY words, metrics, percentages, or tools.`,
     `Rules:`,
     `1. "raw_text": plain-text verbatim transcription of the entire CV.`,
     `2. "template":`,
     `   - "name": candidate full name as written.`,
     `   - "title": headline/role subtitle as written (or "" if none).`,
-    `   - "contactLine": pipe-separated contact items as written (e.g., "Tel Aviv | email | phone | LinkedIn | GitHub").`,
-    `   - "summary": professional summary/profile paragraph verbatim (trimmed cleanly, max ${CV_LIMITS.SUMMARY_MAX} chars).`,
-    `   - "experience": ALL work experience roles in exact order, keeping exact role title, company name, period/dates, and ALL bullet points verbatim (max ${CV_LIMITS.BULLET_MAX} chars each).`,
-    `   - "toolbox": ALL skills/tools grouped into 1–${CV_LIMITS.MAX_TOOLBOX_CATEGORIES} clean categories (e.g., "Data & Languages", "BI & Visualization", "Analytics & ML", "Tools").`,
-    `   - "education": ALL education/certification lines verbatim (1–${CV_LIMITS.EDUCATION_MAX_LINES} lines).`,
-    `   - "extraSections": any other sections present (e.g., "Languages", "Military Service", "Projects", "Volunteering"), or [] if none.`,
+    `   - "contactLine": pipe-separated contact items as written (e.g., "Giv'atayim, Israel | email | phone | LinkedIn").`,
+    `   - "summary": professional summary/profile paragraph COMPLETELY VERBATIM (max ${CV_LIMITS.SUMMARY_MAX} chars).`,
+    `   - "experience": ALL work experience roles in exact order, keeping exact role title, company name, period/dates, and EVERY bullet point COMPLETELY VERBATIM from start to finish (do NOT drop the ends of sentences, max ${CV_LIMITS.BULLET_MAX} chars each).`,
+    `   - "toolbox": ALL skills/tools grouped into their exact categories and EVERY tool listed COMPLETELY VERBATIM (do NOT truncate or drop tools, max ${CV_LIMITS.TOOLBOX_LINE_MAX} chars per row).`,
+    `   - "education": ALL education/coursework/certification lines COMPLETELY VERBATIM (1–${CV_LIMITS.EDUCATION_MAX_LINES} lines).`,
+    `   - "extraSections": any other sections present (e.g., "Languages", "Military Service", "Projects"), or [] if none.`,
   ].join('\n');
 
   if (isPdf) {
@@ -266,8 +268,14 @@ export async function parseUploadedCvToTemplate(params: {
       },
     });
   } else if (isDocx) {
-    const result = await mammoth.extractRawText({ buffer: params.buffer });
+    const [result, docxInfo] = await Promise.all([
+      mammoth.extractRawText({ buffer: params.buffer }),
+      extractDocxInfo(params.buffer).catch(() => null),
+    ]);
     extractedText = result.value.trim();
+    if (docxInfo) {
+      docxLayout = docxInfo.layout;
+    }
     if (extractedText.length < 40) {
       throw new Error('Could not extract readable text from the DOCX file.');
     }
@@ -371,9 +379,10 @@ export async function parseUploadedCvToTemplate(params: {
 
   const parsedJson = parseJsonText(rawJsonText);
   const validated = uploadedCvParseResponseSchema.parse(parsedJson);
+  const sanitized = sanitizeUploadedMasterCv(validated.template);
   return {
     rawText: extractedText || validated.raw_text,
-    template: sanitizeUploadedMasterCv(validated.template),
+    template: docxLayout ? { ...sanitized, layout: docxLayout } : sanitized,
   };
 }
 
@@ -429,9 +438,9 @@ export async function analyzeAndTailorJob(
     masterProfileText,
     ``,
     `LIGHT-TOUCH TAILORING RULES (STRICT):`,
-    `1. PRESERVE STRUCTURE & WORDING: Keep at least 75% of the Master CV's exact wording verbatim. Keep the exact same ${master.experience.length} roles, exact company names, exact dates, exact bullet counts per role, exact education, and exact extra sections.`,
-    `2. SURGICAL SKILL ALIGNMENT ONLY: Make only minimal, targeted adjustments in "summary" and at most 1–2 bullets per role so the job's required skills and keywords stand out naturally. Keep the remaining bullets nearly identical to the Master CV.`,
-    `3. ZERO FABRICATION: NEVER invent fake companies, roles, degrees, dates, metrics, or tools not present in the Master CV. In "toolbox", keep all authentic tools and simply reorder items/categories so job-relevant skills appear first.`,
+    `1. PRESERVE STRUCTURE & WORDING: Keep at least 75–85% of the Master CV's exact wording verbatim. Keep the exact same ${master.experience.length} roles, exact company names, exact dates, exact bullet counts per role, exact education, and exact extra sections.`,
+    `2. SURGICAL SKILL ALIGNMENT ONLY: Make only minimal, targeted keyword adjustments in "summary" and at most 1–2 bullets per role to highlight required skills from the job description. Keep edited bullets roughly the SAME character length (±10%) as the original Master CV bullets so the original 1-page Word template never overflows!`,
+    `3. ZERO FABRICATION: NEVER invent fake companies, roles, degrees, dates, metrics, or tools not present in the Master CV. In "toolbox", keep all authentic tools and simply reorder items so job-relevant skills appear first.`,
     `4. "match_score": integer 1-10 reflecting realistic fit.`,
     `5. "summary_hebrew": Concise Hebrew summary (3-5 lines in natural Hebrew) explaining the role, team/domain, key technical requirements, and location/hybrid setup.`,
     `6. "changes_made": Concise English bulleted list (using "- " prefix, 2-4 bullets) stating ONLY the minimal surgical edits made to align with the job.`,

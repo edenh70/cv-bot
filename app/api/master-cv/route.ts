@@ -7,6 +7,7 @@ import {
   getActiveMasterCv,
   getDefaultMasterCvTemplate,
   saveMasterCvProfile,
+  toPublicMasterCvProfile,
 } from '@/lib/master-cv-store';
 
 export const dynamic = 'force-dynamic';
@@ -23,7 +24,8 @@ export async function GET() {
     const { template, profile } = await getActiveMasterCv();
     return NextResponse.json({
       hasCustomCv: Boolean(profile),
-      profile,
+      hasOriginalDocx: Boolean(profile?.original_file_base64),
+      profile: toPublicMasterCvProfile(profile),
       template,
     });
   } catch (error) {
@@ -58,10 +60,17 @@ export async function POST(request: Request) {
       );
     }
 
+    const filename = entry.name || 'resume.docx';
+    const mimeType = entry.type || '';
+    const isDocx =
+      filename.toLowerCase().endsWith('.docx') ||
+      mimeType ===
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
     const buffer = Buffer.from(await entry.arrayBuffer());
     const parsed = await parseUploadedCvToTemplate({
-      filename: entry.name || 'resume.pdf',
-      mimeType: entry.type || '',
+      filename,
+      mimeType,
       buffer,
     });
 
@@ -70,15 +79,21 @@ export async function POST(request: Request) {
     });
 
     const profile = await saveMasterCvProfile({
-      filename: entry.name || 'resume.pdf',
+      filename,
       rawText: parsed.rawText,
       structured: rendered.cv,
+      originalFileBase64: isDocx ? buffer.toString('base64') : null,
+      originalMimeType: isDocx
+        ? mimeType ||
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        : null,
     });
 
     return NextResponse.json(
       {
         hasCustomCv: true,
-        profile,
+        hasOriginalDocx: Boolean(profile.original_file_base64),
+        profile: toPublicMasterCvProfile(profile),
         template: profile.structured_json,
         pageCount: rendered.pageCount,
         byteLength: rendered.byteLength,
@@ -108,6 +123,7 @@ export async function DELETE() {
     return NextResponse.json({
       ok: true,
       hasCustomCv: false,
+      hasOriginalDocx: false,
       profile: null,
       template: getDefaultMasterCvTemplate(),
     });

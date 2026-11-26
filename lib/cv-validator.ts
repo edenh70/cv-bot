@@ -17,7 +17,7 @@ export const LEAKAGE_PATTERN =
   /\[INSERT|TODO\b|FIXME\b|\bTBD\b|Lorem ipsum|As an AI|Here is your|```|\{\{|\}\}|\bundefined\b|\bNaN\b/i;
 
 const HEBREW_CHAR_PATTERN = /[\u0590-\u05FF]/;
-const DENSITY_ORDER: PdfDensity[] = ['normal', 'compact', 'tight'];
+const DENSITY_ORDER: PdfDensity[] = ['normal', 'compact', 'tight', 'ultra'];
 
 export class CvValidationError extends Error {
   readonly reasons: string[];
@@ -297,7 +297,7 @@ export async function validateAndRenderCv(
     }
   }
 
-  // Only if 'tight' density still overflows beyond 1 page, trim text gently up to 3 attempts
+  // Only if 'ultra' density still overflows beyond 1 page, trim text gently up to 3 attempts
   for (
     let attempt = 0;
     attempt < 3 && binaryCheck.pageCount > CV_PDF_BOUNDS.REQUIRED_PAGES;
@@ -305,12 +305,12 @@ export async function validateAndRenderCv(
   ) {
     currentCv = trimCvSlightly(currentCv, 0.88);
     pdfBuffer = await renderCvPdfBuffer(currentCv, {
-      density: 'tight',
+      density: 'ultra',
       masterTemplate: options?.masterTemplate,
       preserveUploadedShape: true,
     });
     binaryCheck = validatePdfBinary(pdfBuffer);
-    chosenDensity = 'tight';
+    chosenDensity = 'ultra';
   }
 
   if (!binaryCheck.valid) {

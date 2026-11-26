@@ -17,6 +17,7 @@ import type { JobRecord, JobStatus } from '@/lib/types';
 
 interface JobCardProps {
   job: JobRecord;
+  hasOriginalDocx?: boolean;
   onStatusChange: (jobId: string, status: JobStatus) => Promise<void>;
   onJobUpdated?: (updated: JobRecord) => void;
 }
@@ -42,7 +43,12 @@ function formatShortDate(iso: string): string {
   }
 }
 
-export function JobCard({ job, onStatusChange, onJobUpdated }: JobCardProps) {
+export function JobCard({
+  job,
+  hasOriginalDocx = false,
+  onStatusChange,
+  onJobUpdated,
+}: JobCardProps) {
   const [showChanges, setShowChanges] = useState(true);
   const [busyStatus, setBusyStatus] = useState<JobStatus | null>(null);
   const [retailoring, setRetailoring] = useState(false);
@@ -157,25 +163,49 @@ export function JobCard({ job, onStatusChange, onJobUpdated }: JobCardProps) {
 
       {/* Action Buttons — Mobile Thumb-Friendly Grid */}
       <div className="mt-4 grid grid-cols-2 gap-2">
-        {/* 1. Preview / Download PDF */}
+        {/* 1. Download .docx (exact original format) or Preview / Download PDF */}
         <div className="flex gap-1.5">
-          <a
-            href={`/api/cv/${job.id}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#003366] px-3 text-xs font-semibold text-white transition hover:bg-[#004080] active:scale-[0.98] dark:bg-sky-600 dark:hover:bg-sky-500"
-          >
-            <FileText className="h-4 w-4 shrink-0" />
-            <span>Preview PDF</span>
-          </a>
-          <a
-            href={`/api/cv/${job.id}?download=1`}
-            aria-label="Download PDF"
-            title="Download PDF"
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-700 transition hover:bg-slate-100 active:scale-[0.98] dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
-          >
-            <Download className="h-4 w-4" />
-          </a>
+          {hasOriginalDocx ? (
+            <>
+              <a
+                href={`/api/cv/${job.id}?format=docx`}
+                className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#003366] px-2.5 text-xs font-semibold text-white transition hover:bg-[#004080] active:scale-[0.98] dark:bg-sky-600 dark:hover:bg-sky-500"
+              >
+                <Download className="h-4 w-4 shrink-0" />
+                <span>Download .docx</span>
+              </a>
+              <a
+                href={`/api/cv/${job.id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="Preview PDF"
+                title="Preview PDF"
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-700 transition hover:bg-slate-100 active:scale-[0.98] dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+              >
+                <FileText className="h-4 w-4" />
+              </a>
+            </>
+          ) : (
+            <>
+              <a
+                href={`/api/cv/${job.id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#003366] px-3 text-xs font-semibold text-white transition hover:bg-[#004080] active:scale-[0.98] dark:bg-sky-600 dark:hover:bg-sky-500"
+              >
+                <FileText className="h-4 w-4 shrink-0" />
+                <span>Preview PDF</span>
+              </a>
+              <a
+                href={`/api/cv/${job.id}?download=1`}
+                aria-label="Download PDF"
+                title="Download PDF"
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-700 transition hover:bg-slate-100 active:scale-[0.98] dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+              >
+                <Download className="h-4 w-4" />
+              </a>
+            </>
+          )}
         </div>
 
         {/* 2. Open Job Page */}

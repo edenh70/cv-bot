@@ -17,6 +17,13 @@ export interface TailoredCVExtraSection {
   items: string[];
 }
 
+export interface CvLayoutMeta {
+  sectionOrder?: Array<'experience' | 'education' | 'toolbox'>;
+  hasSummaryHeading?: boolean;
+  accentColor?: string;
+  inlineHeaderContact?: boolean;
+}
+
 export interface TailoredCV {
   name?: string;
   title?: string;
@@ -26,6 +33,7 @@ export interface TailoredCV {
   toolbox: TailoredCVToolboxCategory[];
   education: string[];
   extraSections?: TailoredCVExtraSection[];
+  layout?: CvLayoutMeta;
 }
 
 export interface MasterCvProfileRecord {
@@ -33,6 +41,17 @@ export interface MasterCvProfileRecord {
   filename: string;
   raw_text: string;
   structured_json: TailoredCV;
+  original_file_base64?: string | null;
+  original_mime_type?: string | null;
+  updated_at: string;
+}
+
+export interface MasterCvProfilePublic {
+  id: string;
+  filename: string;
+  raw_text: string;
+  structured_json: TailoredCV;
+  hasOriginalDocx: boolean;
   updated_at: string;
 }
 

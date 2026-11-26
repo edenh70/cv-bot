@@ -18,7 +18,7 @@ import {
 import { MasterCvCard } from './MasterCvCard';
 import type {
   JobRecord,
-  MasterCvProfileRecord,
+  MasterCvProfilePublic,
   ScanResultSummary,
   SourceRecord,
   TailoredCV,
@@ -28,11 +28,13 @@ interface QuickAddAndSourcesTabProps {
   sources: SourceRecord[];
   sheetUrl: string;
   hasCustomCv: boolean;
-  masterProfile: MasterCvProfileRecord | null;
+  hasOriginalDocx: boolean;
+  masterProfile: MasterCvProfilePublic | null;
   masterTemplate: TailoredCV | null;
   onMasterCvUpdated: (payload: {
     hasCustomCv: boolean;
-    profile: MasterCvProfileRecord | null;
+    hasOriginalDocx: boolean;
+    profile: MasterCvProfilePublic | null;
     template: TailoredCV;
   }) => void;
   onJobAnalyzed: (job: JobRecord, alreadyExisted: boolean) => void;
@@ -60,6 +62,7 @@ export function QuickAddAndSourcesTab({
   sources,
   sheetUrl,
   hasCustomCv,
+  hasOriginalDocx,
   masterProfile,
   masterTemplate,
   onMasterCvUpdated,
@@ -249,6 +252,7 @@ export function QuickAddAndSourcesTab({
       {/* Section 0: Master CV Upload & Template */}
       <MasterCvCard
         hasCustomCv={hasCustomCv}
+        hasOriginalDocx={hasOriginalDocx}
         profile={masterProfile}
         template={masterTemplate}
         onUpdated={onMasterCvUpdated}
