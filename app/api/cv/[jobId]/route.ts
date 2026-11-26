@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { isAuthenticated } from '@/lib/auth';
-import { renderCvPdfBuffer } from '@/lib/cv-pdf';
+import { CvValidationError, validateAndRenderCv } from '@/lib/cv-validator';
 import { getSupabaseAdmin } from '@/lib/supabase';
 import type { TailoredCV } from '@/lib/types';
 
@@ -41,7 +41,9 @@ export async function GET(
       return NextResponse.json({ error: 'Job not found.' }, { status: 404 });
     }
 
-    const pdfBuffer = await renderCvPdfBuffer(job.tailored_cv_json as TailoredCV);
+    const { pdfBuffer } = await validateAndRenderCv(
+      job.tailored_cv_json as TailoredCV,
+    );
     const safeCompany = sanitizeFilenameSegment(job.company);
     const filename = `Eden_Hadad_CV_${safeCompany}.pdf`;
 
@@ -59,9 +61,10 @@ export async function GET(
     });
   } catch (error) {
     console.error('[api/cv/[jobId] GET] Error:', error);
-    return NextResponse.json(
-      { error: 'Failed to generate CV PDF.' },
-      { status: 500 },
-    );
+    const message =
+      error instanceof CvValidationError
+        ? error.message
+        : 'Failed to generate CV PDF.';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

@@ -43,6 +43,15 @@ export function resolveCandidateUrl(candidateUrl: string, baseUrl: string): stri
   }
 }
 
+export function cleanScrapedMarkdown(raw: string, maxChars: number): string {
+  return raw
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    .slice(0, maxChars);
+}
+
 export async function scrapeUrlWithJina(url: string, maxChars = 25000): Promise<string> {
   const normalizedUrl = normalizeAndValidateUrl(url);
   const jinaEndpoint = `https://r.jina.ai/${normalizedUrl}`;
@@ -67,10 +76,10 @@ export async function scrapeUrlWithJina(url: string, maxChars = 25000): Promise<
     throw new Error(`Jina Reader failed (${response.status} ${response.statusText}) for ${normalizedUrl}`);
   }
 
-  const text = (await response.text()).trim();
+  const text = cleanScrapedMarkdown(await response.text(), maxChars);
   if (!text || text.length < 40) {
     throw new Error(`Jina Reader returned insufficient content for ${normalizedUrl}`);
   }
 
-  return text.slice(0, maxChars);
+  return text;
 }

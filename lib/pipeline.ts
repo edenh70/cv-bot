@@ -1,3 +1,4 @@
+import { validateAndRenderCv } from './cv-validator';
 import { analyzeAndTailorJob, extractMatchingJobs } from './gemini';
 import { syncSourcesFromGoogleSheet } from './google-sheet';
 import { normalizeAndValidateUrl, scrapeUrlWithJina } from './jina';
@@ -90,6 +91,13 @@ export async function analyzeSingleJobUrl(
     customPrompt: options?.customPrompt,
   });
 
+  // Fail-safe guardrail: validate content AND verify 1-page PDF renders cleanly before storing
+  const validated = await validateAndRenderCv(analysis.tailored_cv_json, {
+    match_score: analysis.match_score,
+    summary_hebrew: analysis.summary_hebrew,
+    changes_made: analysis.changes_made,
+  });
+
   const { data: inserted, error: insertError } = await supabase
     .from('jobs')
     .insert({
@@ -100,7 +108,7 @@ export async function analyzeSingleJobUrl(
       match_score: analysis.match_score,
       summary_hebrew: analysis.summary_hebrew,
       changes_made: analysis.changes_made,
-      tailored_cv_json: analysis.tailored_cv_json,
+      tailored_cv_json: validated.cv,
       status: 'pending_review',
     })
     .select('*')

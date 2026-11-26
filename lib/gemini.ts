@@ -17,10 +17,10 @@ const EXTRACTION_MODELS = Array.from(
   new Set(
     [
       process.env.GEMINI_EXTRACTION_MODEL || 'gemini-3.5-flash-lite',
+      'gemini-3.1-flash-lite',
       process.env.GEMINI_MODEL || 'gemini-3.6-flash',
       'gemini-3.5-flash',
       'gemini-3.8-flash',
-      'gemini-3.7-flash',
     ].filter(Boolean),
   ),
 );
@@ -31,8 +31,8 @@ const TAILORING_MODELS = Array.from(
       process.env.GEMINI_MODEL || 'gemini-3.6-flash',
       'gemini-3.5-flash',
       'gemini-3.5-flash-lite',
+      'gemini-3.1-flash-lite',
       'gemini-3.8-flash',
-      'gemini-3.7-flash',
     ].filter(Boolean),
   ),
 );
@@ -98,6 +98,25 @@ async function generateJsonWithFallback(
         );
         continue;
       }
+      if (!hasNext && isRetryableGeminiError(error) && model !== 'gemini-3.5-flash-lite') {
+        await new Promise((r) => setTimeout(r, 800));
+        try {
+          const retryResp = await ai.models.generateContent({
+            model: 'gemini-3.5-flash-lite',
+            contents: prompt,
+            config: {
+              ...config,
+              httpOptions: {
+                ...(config.httpOptions ?? {}),
+                timeout: timeoutMs,
+              },
+            },
+          });
+          return retryResp.text;
+        } catch (retryErr) {
+          lastError = retryErr;
+        }
+      }
       throw error;
     }
   }
@@ -132,9 +151,9 @@ export async function extractMatchingJobs(
     customPrompt ? `User Focus Instructions: ${customPrompt}` : '',
     ``,
     `Inclusion criteria (ALL must hold):`,
-    `1. Role title is Data Analyst, Product Analyst, BI Analyst, Business Intelligence Analyst, Marketing/Growth Data Analyst, or Analytics Engineer/Analyst requiring 1–5 years of experience.`,
-    `2. Exclude senior staff/principal/director/VP roles, pure Data Engineer roles, pure Software Engineer roles, or internships.`,
-    `3. Location must be Israel, Tel Aviv, Central Israel, Hybrid (Israel), or Remote (eligible from Israel). Exclude roles strictly requiring relocation to US/EU-only offices.`,
+    `1. Include roles matching: Data Analyst, Senior Data Analyst, Product Analyst, Senior Product Analyst, BI Analyst, Business Intelligence Analyst, Big Data Analyst, Marketing/Growth/Revenue/Risk/Fraud/Operations Data Analyst, Analytics Engineer, Data Analyst / Data Scientist hybrid roles, and Hebrew titles (דאטה אנליסט, אנליסט נתונים, אנליסט מוצר, אנליסט BI).`,
+    `2. Exclude VP, Director, Head of, Team Lead / People Manager, Principal/Staff Software Engineer, pure Backend/Frontend/Fullstack/DevOps/QA Engineer, and Intern/Student roles.`,
+    `3. Location must be Israel, Tel Aviv / Tel Aviv-Yafo, Central Israel, Hybrid (Israel), or Remote (eligible from Israel). Exclude roles explicitly located outside Israel (e.g., Prague, NYC, London, Berlin) unless marked Remote from Israel.`,
     `4. Each entry MUST have a specific job posting URL (resolve relative links against ${sourceUrl} if needed). Skip generic career homepages without a job ID/slug.`,
     `5. Pagination: If the page has a link to the next page of job listings (e.g., "Next", "Page 2", "?page=2"), set "nextPageUrl" to that resolved URL; otherwise set "nextPageUrl" to "".`,
     ``,
