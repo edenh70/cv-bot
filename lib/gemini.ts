@@ -13,18 +13,31 @@ import type {
   TailoredCV,
 } from './types';
 
-const GEMINI_MODELS = Array.from(
+const EXTRACTION_MODELS = Array.from(
   new Set(
     [
-      process.env.GEMINI_MODEL || 'gemini-3.8-flash',
-      'gemini-3.7-flash',
-      'gemini-3.6-flash',
+      process.env.GEMINI_EXTRACTION_MODEL || 'gemini-3.5-flash-lite',
+      process.env.GEMINI_MODEL || 'gemini-3.6-flash',
       'gemini-3.5-flash',
+      'gemini-3.8-flash',
+      'gemini-3.7-flash',
     ].filter(Boolean),
   ),
 );
 
-const FALLBACK_STATUS_CODES = new Set([404, 429, 503]);
+const TAILORING_MODELS = Array.from(
+  new Set(
+    [
+      process.env.GEMINI_MODEL || 'gemini-3.6-flash',
+      'gemini-3.5-flash',
+      'gemini-3.5-flash-lite',
+      'gemini-3.8-flash',
+      'gemini-3.7-flash',
+    ].filter(Boolean),
+  ),
+);
+
+const FALLBACK_STATUS_CODES = new Set([404, 408, 429, 500, 502, 503, 504]);
 
 function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -42,29 +55,46 @@ function getHttpStatus(error: unknown): number | undefined {
   return undefined;
 }
 
+function isRetryableGeminiError(error: unknown): boolean {
+  const status = getHttpStatus(error);
+  if (status !== undefined && FALLBACK_STATUS_CODES.has(status)) {
+    return true;
+  }
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return /DEADLINE_EXCEEDED|UNAVAILABLE|timeout|timed out|aborted/i.test(message);
+}
+
 async function generateJsonWithFallback(
   ai: GoogleGenAI,
   prompt: string,
   config: GenerateContentConfig,
+  models: string[],
+  timeoutMs = 18000,
 ): Promise<string | undefined> {
   let lastError: unknown;
 
-  for (let i = 0; i < GEMINI_MODELS.length; i++) {
-    const model = GEMINI_MODELS[i];
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i];
     try {
       const response = await ai.models.generateContent({
         model,
         contents: prompt,
-        config,
+        config: {
+          ...config,
+          httpOptions: {
+            ...(config.httpOptions ?? {}),
+            timeout: timeoutMs,
+          },
+        },
       });
       return response.text;
     } catch (error) {
       lastError = error;
-      const status = getHttpStatus(error);
-      const hasNext = i < GEMINI_MODELS.length - 1;
-      if (hasNext && status !== undefined && FALLBACK_STATUS_CODES.has(status)) {
+      const hasNext = i < models.length - 1;
+      if (hasNext && isRetryableGeminiError(error)) {
+        const status = getHttpStatus(error);
         console.warn(
-          `[gemini] Model ${model} returned ${status}; falling back to ${GEMINI_MODELS[i + 1]}`,
+          `[gemini] Model ${model} failed (${status ?? 'timeout/err'}); falling back to ${models[i + 1]}`,
         );
         continue;
       }
@@ -136,7 +166,7 @@ export async function extractMatchingJobs(
       },
       required: ['jobs', 'nextPageUrl'],
     },
-  });
+  }, EXTRACTION_MODELS, 15000);
 
   const parsedJson = parseJsonText(rawText);
   const validated = jobExtractionResponseSchema.parse(parsedJson);
@@ -292,7 +322,7 @@ export async function analyzeAndTailorJob(
         'tailored_cv_json',
       ],
     },
-  });
+  }, TAILORING_MODELS, 22000);
 
   const parsedJson = parseJsonText(rawText);
   const validated = jobAnalysisResponseSchema.parse(parsedJson);

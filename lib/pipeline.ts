@@ -135,7 +135,7 @@ export async function runDailyScan(
   const maxPagesPerSource = clamp(opts.maxPagesPerSource ?? 3, 1, 3);
   const customPrompt = opts.customPrompt?.trim() || undefined;
   const startedAt = Date.now();
-  const timeBudgetMs = 95_000;
+  const timeBudgetMs = 70_000;
 
   const supabase = getSupabaseAdmin();
   const syncErrors: string[] = [];
