@@ -85,6 +85,70 @@ export function isKnownExternalAtsHost(url: string): boolean {
   }
 }
 
+function decodeHtmlEntities(input: string): string {
+  return input
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0*39;|&apos;/gi, "'")
+    .replace(/&#(\d+);/g, (_m, dec) => {
+      const code = Number(dec);
+      return Number.isFinite(code) && code > 0 ? String.fromCodePoint(code) : '';
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_m, hex) => {
+      const code = parseInt(hex, 16);
+      return Number.isFinite(code) && code > 0 ? String.fromCodePoint(code) : '';
+    });
+}
+
+/**
+ * Lightweight HTML-to-Markdown converter used as a fast direct fallback when
+ * Jina Reader is blocked (422), rate-limited, or times out on heavy pages.
+ */
+export function htmlToMarkdown(html: string, baseUrl: string): string {
+  const withoutScripts = html
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, ' ')
+    .replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, ' ');
+
+  const withLinks = withoutScripts.replace(
+    /<a\b([^>]*)href=(?:"([^"]*)"|'([^']*)'|([^\s>]+))([^>]*)>([\s\S]*?)<\/a>/gi,
+    (_full, _pre, dq, sq, bare, _post, inner) => {
+      const rawHref = (dq ?? sq ?? bare ?? '').trim();
+      const innerText = decodeHtmlEntities(
+        inner.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
+      ).replace(/[\[\]]/g, '');
+      if (!innerText || !rawHref) {
+        return innerText ? ` ${innerText} ` : ' ';
+      }
+      if (rawHref.startsWith('#') || /^javascript:/i.test(rawHref)) {
+        return ` [${innerText}](${rawHref}) `;
+      }
+      const resolved = resolveCandidateUrl(decodeHtmlEntities(rawHref), baseUrl);
+      if (!resolved) {
+        return ` ${innerText} `;
+      }
+      return ` [${innerText}](${resolved}) `;
+    },
+  );
+
+  const withBreaks = withLinks
+    .replace(/<(?:br|hr)\s*\/?>/gi, '\n')
+    .replace(/<\/(?:p|div|li|tr|h[1-6]|section|article|header|footer)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');
+
+  return decodeHtmlEntities(withBreaks)
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 export function cleanScrapedMarkdown(raw: string, maxChars: number): string {
   const cleaned = raw
     .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
@@ -164,7 +228,6 @@ function parsePageNumberFromUrl(url: string): number {
     if (pagePathMatch) {
       return Math.max(1, parseInt(pagePathMatch[1], 10));
     }
-    // TalentBrew pattern e.g. /en/location/israel-jobs/47263/294640/2/2
     const segments = u.pathname.split('/').filter(Boolean);
     if (
       segments.length >= 2 &&
@@ -185,7 +248,7 @@ function isJsOnlyHref(rawHref: string): boolean {
   return (
     lower === '#' ||
     lower.endsWith('/#') ||
-    lower.includes('#') && lower.replace(/#.*$/, '') === '' ||
+    (lower.includes('#') && lower.replace(/#.*$/, '') === '') ||
     lower.startsWith('javascript:')
   );
 }
@@ -260,9 +323,15 @@ export function extractNavigationFromMarkdown(
     if (!rawHref || isJsOnlyHref(rawHref) || ASSET_EXTENSION_REGEX.test(rawHref)) {
       return null;
     }
-    // Check `#` pointing strictly back to current page
     const withoutHash = rawHref.split('#')[0];
-    if (rawHref.includes('#') && (!withoutHash || isSameUrlIgnoringTrailingSlash(resolveCandidateUrl(withoutHash, currentNorm) || '', currentNorm))) {
+    if (
+      rawHref.includes('#') &&
+      (!withoutHash ||
+        isSameUrlIgnoringTrailingSlash(
+          resolveCandidateUrl(withoutHash, currentNorm) || '',
+          currentNorm,
+        ))
+    ) {
       return null;
     }
     const resolved = resolveCandidateUrl(rawHref, currentNorm);
@@ -277,25 +346,20 @@ export function extractNavigationFromMarkdown(
     return resolved;
   };
 
-  // Priority 1: Explicit "Next" / "הבא" link
   for (const link of links) {
     if (NEXT_LABEL_REGEX.test(link.label)) {
-      if (isJsOnlyHref(link.rawHref) || /\/career\/open-positions\/#|#$/.test(link.rawHref)) {
+      if (isJsOnlyHref(link.rawHref) || /#$/.test(link.rawHref)) {
         sawJsPaginationHref = true;
         continue;
       }
       const candidate = resolveSameHostNext(link.rawHref);
-      if (candidate && parsePageNumberFromUrl(candidate) >= nextPageNum || (candidate && !candidate.includes('lang='))) {
-        // Avoid language switchers when matching explicit Next
-        if (candidate && !/\/(de|fr|ja|es)\//i.test(candidate)) {
-          nextPageUrl = candidate;
-          break;
-        }
+      if (candidate && !/\/(de|fr|ja|es)\//i.test(candidate)) {
+        nextPageUrl = candidate;
+        break;
       }
     }
   }
 
-  // Priority 2: Explicit numbered link ("2" on page 1, "3" on page 2) with paginated URL
   if (!nextPageUrl) {
     for (const link of links) {
       if (link.label === String(nextPageNum)) {
@@ -315,7 +379,6 @@ export function extractNavigationFromMarkdown(
     }
   }
 
-  // Priority 3: Any same-host link whose URL clearly increments to nextPageNum
   if (!nextPageUrl) {
     for (const link of links) {
       const candidate = resolveSameHostNext(link.rawHref);
@@ -329,7 +392,6 @@ export function extractNavigationFromMarkdown(
     }
   }
 
-  // Subpage/ATS discovery on page 1 when source URL is a wrapper/homepage
   if (currentPageNum === 1) {
     for (const link of links) {
       if (isJsOnlyHref(link.rawHref) || ASSET_EXTENSION_REGEX.test(link.rawHref)) {
@@ -339,7 +401,6 @@ export function extractNavigationFromMarkdown(
       if (!resolved || isSameUrlIgnoringTrailingSlash(resolved, currentNorm)) {
         continue;
       }
-      // Prefer external ATS job boards embedded on a company page
       if (
         isKnownExternalAtsHost(resolved) &&
         !/introduceYourself|talent-community/i.test(resolved)
@@ -374,7 +435,6 @@ export function extractNavigationFromMarkdown(
     }
   }
 
-  // Detect JS-only pagination ("2", "הבא", "טען עוד", "page 1 of ...") when no URL next page exists
   if (!nextPageUrl && !sawJsPaginationHref) {
     const hasNumberedHashLink = links.some(
       (l) =>
@@ -393,13 +453,43 @@ export function extractNavigationFromMarkdown(
   };
 }
 
-export async function scrapePageWithJina(
-  url: string,
-  maxChars = 45000,
-): Promise<ScrapedPageResult> {
-  const normalizedUrl = normalizeAndValidateUrl(url);
-  const jinaEndpoint = `https://r.jina.ai/${normalizedUrl}`;
+async function scrapeDirectHtml(normalizedUrl: string): Promise<string> {
+  const response = await fetch(normalizedUrl, {
+    method: 'GET',
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      Accept:
+        'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7',
+    },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(8000),
+    cache: 'no-store',
+  });
 
+  if (!response.ok) {
+    throw new Error(
+      `Direct fetch failed (${response.status} ${response.statusText})`,
+    );
+  }
+
+  const contentType = response.headers.get('content-type') || '';
+  const finalUrl = response.url || normalizedUrl;
+  const rawBody = await response.text();
+  const markdown = /html|xml/i.test(contentType) || /<html|<body|<div/i.test(rawBody)
+    ? htmlToMarkdown(rawBody, finalUrl)
+    : cleanScrapedMarkdown(rawBody, 160_000);
+
+  const bounded = cleanScrapedMarkdown(markdown, 160_000);
+  if (!bounded || bounded.length < 40) {
+    throw new Error('Direct fetch returned insufficient readable content');
+  }
+  return bounded;
+}
+
+async function fetchJinaMarkdown(normalizedUrl: string): Promise<string> {
+  const jinaEndpoint = `https://r.jina.ai/${normalizedUrl}`;
   const headers: Record<string, string> = {
     Accept: 'text/markdown',
     'X-Return-Format': 'markdown',
@@ -412,7 +502,7 @@ export async function scrapePageWithJina(
   const response = await fetch(jinaEndpoint, {
     method: 'GET',
     headers,
-    signal: AbortSignal.timeout(20000),
+    signal: AbortSignal.timeout(12000),
     cache: 'no-store',
   });
 
@@ -428,6 +518,60 @@ export async function scrapePageWithJina(
     throw new Error(
       `Jina Reader returned insufficient content for ${normalizedUrl}`,
     );
+  }
+
+  return fullMarkdown;
+}
+
+export async function scrapePageWithJina(
+  url: string,
+  maxChars = 45000,
+): Promise<ScrapedPageResult> {
+  const normalizedUrl = normalizeAndValidateUrl(url);
+
+  let fullMarkdown: string | null = null;
+  let jinaErrorMsg: string | null = null;
+  let jinaBlockMsg: string | null = null;
+
+  try {
+    const candidate = await fetchJinaMarkdown(normalizedUrl);
+    jinaBlockMsg = detectBotBlock(candidate);
+    if (!jinaBlockMsg) {
+      fullMarkdown = candidate;
+    }
+  } catch (err) {
+    jinaErrorMsg = err instanceof Error ? err.message : 'Jina Reader error';
+  }
+
+  // Fallback to direct HTML fetch when Jina returns 422, times out, or hits Cloudflare
+  if (!fullMarkdown) {
+    try {
+      const directCandidate = await scrapeDirectHtml(normalizedUrl);
+      const directBlock = detectBotBlock(directCandidate);
+      if (!directBlock || !jinaBlockMsg) {
+        fullMarkdown = directCandidate;
+      } else {
+        fullMarkdown = directCandidate;
+      }
+    } catch (directErr) {
+      if (jinaBlockMsg) {
+        return {
+          markdown: '',
+          fullMarkdown: '',
+          blockedReason: jinaBlockMsg,
+          nextPageUrl: null,
+          subpageCareerUrl: null,
+          hasJsOnlyPagination: false,
+        };
+      }
+      const directMsg =
+        directErr instanceof Error ? directErr.message : 'Direct fetch failed';
+      throw new Error(
+        jinaErrorMsg
+          ? `${jinaErrorMsg} (fallback: ${directMsg})`
+          : `Failed to fetch ${normalizedUrl}: ${directMsg}`,
+      );
+    }
   }
 
   const blockedReason = detectBotBlock(fullMarkdown);

@@ -9,7 +9,9 @@ export const maxDuration = 180;
 const scanRequestSchema = z.object({
   prompt: z.string().trim().max(400).optional(),
   maxJobs: z.coerce.number().int().min(1).max(5).optional(),
-  maxSources: z.coerce.number().int().min(1).max(15).optional(),
+  maxSources: z.coerce.number().int().min(1).max(60).optional(),
+  excludeSourceIds: z.array(z.string().uuid()).max(100).optional(),
+  keepSearchingUntilMatch: z.boolean().optional(),
 });
 
 export async function GET(request: Request) {
@@ -25,6 +27,7 @@ export async function GET(request: Request) {
       maxNewJobs: 3,
       maxSources: 8,
       maxPagesPerSource: 3,
+      keepSearchingUntilMatch: true,
     });
     return NextResponse.json(summary);
   } catch (error) {
@@ -58,6 +61,8 @@ export async function POST(request: Request) {
       maxNewJobs: parsed.data.maxJobs ?? 3,
       maxSources: parsed.data.maxSources ?? 8,
       maxPagesPerSource: 3,
+      excludeSourceIds: parsed.data.excludeSourceIds,
+      keepSearchingUntilMatch: parsed.data.keepSearchingUntilMatch ?? true,
     });
     return NextResponse.json(summary);
   } catch (error) {

@@ -16,7 +16,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { MasterCvCard } from './MasterCvCard';
-import { ScanReportBox } from './ScanReportBox';
+import { ScanReportBox, mergeScanSummaries } from './ScanReportBox';
 import type {
   JobRecord,
   MasterCvProfilePublic,
@@ -230,17 +230,48 @@ export function QuickAddAndSourcesTab({
     setScanResult(null);
 
     try {
-      const res = await fetch('/api/cron/scan', { method: 'POST' });
-      const data = await res.json().catch(() => ({}));
+      const excludeIds: string[] = [];
+      let merged: ScanResultSummary | null = null;
 
-      if (!res.ok) {
-        setScanError(data.error || 'Scan failed.');
-        return;
+      for (let round = 0; round < 4; round++) {
+        const res = await fetch('/api/cron/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            maxSources: 12,
+            excludeSourceIds: excludeIds.length > 0 ? excludeIds : undefined,
+            keepSearchingUntilMatch: true,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+          setScanError(data.error || 'Scan failed.');
+          break;
+        }
+
+        const chunk = data as ScanResultSummary;
+        merged = mergeScanSummaries(merged, chunk);
+        setScanResult(merged);
+
+        for (const s of chunk.scannedSources ?? []) {
+          if (!excludeIds.includes(s.sourceId)) {
+            excludeIds.push(s.sourceId);
+          }
+        }
+
+        const foundAny = merged.jobsAdded > 0 || merged.candidatesFound > 0;
+        const exhausted =
+          !chunk.hasMoreSources || (chunk.scannedSources?.length ?? 0) === 0;
+        if (foundAny || exhausted) {
+          break;
+        }
       }
 
-      setScanResult(data as ScanResultSummary);
-      onScanComplete(data as ScanResultSummary);
-      await onSourcesChanged();
+      if (merged) {
+        onScanComplete(merged);
+        await onSourcesChanged();
+      }
     } catch {
       setScanError('Network error during scan.');
     } finally {

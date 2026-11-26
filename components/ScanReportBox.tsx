@@ -3,6 +3,40 @@
 import { ExternalLink, Globe, AlertTriangle, CheckCircle2, XCircle } from 'lucide-react';
 import type { ScannedSourceReport, ScanResultSummary } from '@/lib/types';
 
+export function mergeScanSummaries(
+  prev: ScanResultSummary | null,
+  next: ScanResultSummary,
+): ScanResultSummary {
+  if (!prev) {
+    return next;
+  }
+
+  const seenSourceIds = new Set(prev.scannedSources.map((s) => s.sourceId));
+  const combinedSources = [
+    ...prev.scannedSources,
+    ...(next.scannedSources ?? []).filter((s) => !seenSourceIds.has(s.sourceId)),
+  ];
+
+  const seenJobIds = new Set(prev.jobs.map((j) => j.id));
+  const combinedJobs = [
+    ...prev.jobs,
+    ...(next.jobs ?? []).filter((j) => !seenJobIds.has(j.id)),
+  ];
+
+  return {
+    sourcesScanned: combinedSources.length,
+    pagesCrawled: prev.pagesCrawled + next.pagesCrawled,
+    candidatesFound: prev.candidatesFound + next.candidatesFound,
+    jobsAdded: prev.jobsAdded + next.jobsAdded,
+    jobsSkipped: prev.jobsSkipped + next.jobsSkipped,
+    errors: Array.from(new Set([...prev.errors, ...(next.errors ?? [])])),
+    jobs: combinedJobs,
+    scannedSources: combinedSources,
+    hasMoreSources: next.hasMoreSources,
+    remainingSources: next.remainingSources,
+  };
+}
+
 interface ScanReportBoxProps {
   summary: ScanResultSummary;
 }
@@ -92,9 +126,18 @@ export function ScanReportBox({ summary }: ScanReportBoxProps) {
 
       {checkedSites.length > 0 && (
         <div className="mt-2.5 space-y-1.5 border-t border-sky-200/80 pt-2.5 dark:border-sky-800/50">
-          <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-            <Globe className="h-3.5 w-3.5" />
-            <span>Websites Checked ({checkedSites.length})</span>
+          <div className="flex items-center justify-between gap-2 text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+            <span className="flex items-center gap-1.5">
+              <Globe className="h-3.5 w-3.5" />
+              Websites Checked ({checkedSites.length})
+            </span>
+            {typeof summary.remainingSources === 'number' && (
+              <span className="text-[10px] font-medium normal-case tracking-normal text-slate-500 dark:text-slate-400">
+                {summary.remainingSources === 0
+                  ? 'All active websites checked'
+                  : `${summary.remainingSources} remaining`}
+              </span>
+            )}
           </div>
 
           <ul className="space-y-1.5">

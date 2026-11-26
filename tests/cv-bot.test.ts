@@ -27,6 +27,7 @@ import {
   cleanScrapedMarkdown,
   detectBotBlock,
   extractNavigationFromMarkdown,
+  htmlToMarkdown,
   normalizeAndValidateUrl,
 } from '../lib/jina';
 import { prioritizeSourcesByPrompt } from '../lib/pipeline';
@@ -481,4 +482,17 @@ test('prioritizeSourcesByPrompt boosts traditional sector sources for "low tech"
     ['הפניקס', 'בנק לאומי'].includes(ordered[0].name) &&
       ['הפניקס', 'בנק לאומי'].includes(ordered[1].name),
   );
+});
+
+test('htmlToMarkdown converts anchors cleanly, strips scripts, and preserves Next pagination links', () => {
+  const html = `<!doctype html><html><head><title>Jobs</title><script>var x=1;</script></head><body>
+    <h1>הראל ביטוח &amp; פיננסים</h1>
+    <div class="job"><a href="/jobs/data-analyst-101">Senior Data Analyst</a></div>
+    <nav><a href="?page=2">הבא</a></nav>
+  </body></html>`;
+  const md = htmlToMarkdown(html, 'https://tech.harel-group.co.il/');
+  assert.equal(md.includes('var x=1'), false);
+  assert.ok(md.includes('הראל ביטוח & פיננסים'));
+  assert.ok(md.includes('[Senior Data Analyst](https://tech.harel-group.co.il/jobs/data-analyst-101)'));
+  assert.ok(md.includes('[הבא](https://tech.harel-group.co.il/?page=2)'));
 });

@@ -133,4 +133,6 @@ export interface ScanResultSummary {
   errors: string[];
   jobs: JobRecord[];
   scannedSources: ScannedSourceReport[];
+  hasMoreSources?: boolean;
+  remainingSources?: number;
 }
