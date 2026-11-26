@@ -58,8 +58,14 @@ export interface ExtractedJobCandidate {
   url: string;
 }
 
+export interface JobExtractionResult {
+  jobs: ExtractedJobCandidate[];
+  nextPageUrl: string | null;
+}
+
 export interface ScanResultSummary {
   sourcesScanned: number;
+  pagesCrawled: number;
   candidatesFound: number;
   jobsAdded: number;
   jobsSkipped: number;

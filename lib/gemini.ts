@@ -7,7 +7,11 @@ import {
   sanitizeTailoredCV,
 } from './cv-schema';
 import { resolveCandidateUrl } from './jina';
-import type { ExtractedJobCandidate, TailoredCV } from './types';
+import type {
+  ExtractedJobCandidate,
+  JobExtractionResult,
+  TailoredCV,
+} from './types';
 
 const GEMINI_MODELS = Array.from(
   new Set(
@@ -87,23 +91,28 @@ export async function extractMatchingJobs(
   sourceName: string,
   sourceUrl: string,
   markdown: string,
-): Promise<ExtractedJobCandidate[]> {
+  customPrompt?: string,
+): Promise<JobExtractionResult> {
   const ai = getGeminiClient();
 
   const prompt = [
     `You are an expert technical recruiter extracting relevant Data Analyst job listings from a company career page.`,
     `Source Name: ${sourceName}`,
     `Source URL: ${sourceUrl}`,
+    customPrompt ? `User Focus Instructions: ${customPrompt}` : '',
     ``,
     `Inclusion criteria (ALL must hold):`,
     `1. Role title is Data Analyst, Product Analyst, BI Analyst, Business Intelligence Analyst, Marketing/Growth Data Analyst, or Analytics Engineer/Analyst requiring 1–5 years of experience.`,
     `2. Exclude senior staff/principal/director/VP roles, pure Data Engineer roles, pure Software Engineer roles, or internships.`,
     `3. Location must be Israel, Tel Aviv, Central Israel, Hybrid (Israel), or Remote (eligible from Israel). Exclude roles strictly requiring relocation to US/EU-only offices.`,
     `4. Each entry MUST have a specific job posting URL (resolve relative links against ${sourceUrl} if needed). Skip generic career homepages without a job ID/slug.`,
+    `5. Pagination: If the page has a link to the next page of job listings (e.g., "Next", "Page 2", "?page=2"), set "nextPageUrl" to that resolved URL; otherwise set "nextPageUrl" to "".`,
     ``,
     `Career page markdown:`,
     markdown,
-  ].join('\n');
+  ]
+    .filter(Boolean)
+    .join('\n');
 
   const rawText = await generateJsonWithFallback(ai, prompt, {
     temperature: 0.1,
@@ -123,8 +132,9 @@ export async function extractMatchingJobs(
             required: ['title', 'company', 'url'],
           },
         },
+        nextPageUrl: { type: Type.STRING },
       },
-      required: ['jobs'],
+      required: ['jobs', 'nextPageUrl'],
     },
   });
 
@@ -145,7 +155,23 @@ export async function extractMatchingJobs(
     });
   }
 
-  return results;
+  let nextPageUrl: string | null = null;
+  if (validated.nextPageUrl) {
+    const resolvedNext = resolveCandidateUrl(validated.nextPageUrl, sourceUrl);
+    try {
+      if (
+        resolvedNext &&
+        resolvedNext !== sourceUrl &&
+        new URL(resolvedNext).hostname === new URL(sourceUrl).hostname
+      ) {
+        nextPageUrl = resolvedNext;
+      }
+    } catch {
+      nextPageUrl = null;
+    }
+  }
+
+  return { jobs: results, nextPageUrl };
 }
 
 export interface TailoredJobAnalysis {
@@ -160,7 +186,7 @@ export interface TailoredJobAnalysis {
 export async function analyzeAndTailorJob(
   jobUrl: string,
   jobMarkdown: string,
-  hints?: { company?: string; title?: string },
+  hints?: { company?: string; title?: string; customPrompt?: string },
 ): Promise<TailoredJobAnalysis> {
   const ai = getGeminiClient();
 
@@ -196,6 +222,9 @@ export async function analyzeAndTailorJob(
     ``,
     hints?.company ? `Hinted Company: ${hints.company}` : '',
     hints?.title ? `Hinted Title: ${hints.title}` : '',
+    hints?.customPrompt
+      ? `Additional User Focus: ${hints.customPrompt} (prioritize authentic relevant experience/keywords accordingly while NEVER inventing fake companies, degrees, or tools)`
+      : '',
     `Job URL: ${jobUrl}`,
     ``,
     `Job Posting Markdown:`,

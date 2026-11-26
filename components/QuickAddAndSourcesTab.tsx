@@ -419,6 +419,7 @@ export function QuickAddAndSourcesTab({
             </div>
             <div className="mt-1 text-slate-600 dark:text-slate-400">
               {scanResult.sourcesScanned} sources scanned &middot;{' '}
+              {scanResult.pagesCrawled} pages crawled &middot;{' '}
               {scanResult.candidatesFound} Data Analyst matches &middot;{' '}
               {scanResult.jobsSkipped} already processed
             </div>

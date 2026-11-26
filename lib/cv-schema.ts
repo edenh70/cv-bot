@@ -27,6 +27,7 @@ export const jobExtractionCandidateSchema = z.object({
 
 export const jobExtractionResponseSchema = z.object({
   jobs: z.array(jobExtractionCandidateSchema).default([]),
+  nextPageUrl: z.string().optional().default(''),
 });
 
 export const tailoredCVRawSchema = z.object({

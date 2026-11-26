@@ -12,6 +12,8 @@ import {
   RefreshCw,
   Loader2,
   Inbox,
+  Sparkles,
+  AlertCircle,
 } from 'lucide-react';
 import { JobCard } from './JobCard';
 import { QuickAddAndSourcesTab } from './QuickAddAndSourcesTab';
@@ -41,6 +43,13 @@ export function DashboardShell() {
   const [refreshing, setRefreshing] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
+
+  // On-demand Agent Scan Prompt state (Daily Feed)
+  const [scanPrompt, setScanPrompt] = useState('');
+  const [maxJobs, setMaxJobs] = useState<3 | 5>(3);
+  const [scanningFeed, setScanningFeed] = useState(false);
+  const [feedScanSummary, setFeedScanSummary] = useState<ScanResultSummary | null>(null);
+  const [feedScanError, setFeedScanError] = useState<string | null>(null);
 
   useEffect(() => {
     setDarkMode(document.documentElement.classList.contains('dark'));
@@ -167,6 +176,41 @@ export function DashboardShell() {
     );
   }
 
+  async function handlePromptScan(e: React.FormEvent) {
+    e.preventDefault();
+    if (scanningFeed) return;
+
+    setScanningFeed(true);
+    setFeedScanError(null);
+    setFeedScanSummary(null);
+
+    try {
+      const res = await fetch('/api/cron/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: scanPrompt.trim() || undefined,
+          maxJobs,
+          maxSources: 8,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        setFeedScanError(data.error || 'Agent scan failed.');
+        return;
+      }
+
+      const summary = data as ScanResultSummary;
+      setFeedScanSummary(summary);
+      handleScanComplete(summary);
+    } catch {
+      setFeedScanError('Network error while running agent scan.');
+    } finally {
+      setScanningFeed(false);
+    }
+  }
+
   const pendingJobs = jobs.filter((j) => j.status === 'pending_review');
   const appliedJobs = jobs
     .filter((j) => j.status === 'applied')
@@ -247,6 +291,85 @@ export function DashboardShell() {
           <>
             {activeTab === 'feed' && (
               <div className="space-y-4">
+                {/* Interactive Agent Scan Prompt Card */}
+                <form
+                  onSubmit={handlePromptScan}
+                  className="rounded-2xl border border-slate-200 bg-white p-3.5 shadow-sm dark:border-slate-800 dark:bg-slate-900/90"
+                >
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-[#003366] dark:text-sky-400">
+                      <Sparkles className="h-3.5 w-3.5" />
+                      <span>Ask Agent to Scan &amp; Prepare CVs</span>
+                    </div>
+                    <div className="flex rounded-lg border border-slate-200 bg-slate-50 p-0.5 text-[11px] font-semibold dark:border-slate-700 dark:bg-slate-950">
+                      {([3, 5] as const).map((count) => (
+                        <button
+                          key={count}
+                          type="button"
+                          onClick={() => setMaxJobs(count)}
+                          className={`rounded-md px-2 py-0.5 transition ${
+                            maxJobs === count
+                              ? 'bg-[#003366] text-white dark:bg-sky-600'
+                              : 'text-slate-500 dark:text-slate-400'
+                          }`}
+                        >
+                          {count} CVs
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <input
+                    type="text"
+                    value={scanPrompt}
+                    onChange={(e) => setScanPrompt(e.target.value)}
+                    placeholder="Optional focus: e.g. 'Similarweb, Gong' or 'Product Analyst Tel Aviv'..."
+                    className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm text-slate-900 outline-none transition focus:border-[#003366] focus:bg-white focus:ring-2 focus:ring-[#003366]/15 dark:border-slate-700 dark:bg-slate-950 dark:text-white dark:focus:border-sky-500 dark:focus:bg-slate-900"
+                  />
+
+                  <button
+                    type="submit"
+                    disabled={scanningFeed}
+                    className="mt-2.5 flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#003366] px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-[#004080] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60 dark:bg-sky-600 dark:hover:bg-sky-500"
+                  >
+                    {scanningFeed ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Syncing Sheet, Crawling Pages &amp; Tailoring CVs...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="h-4 w-4" />
+                        Scan Sources &amp; Prepare CVs
+                      </>
+                    )}
+                  </button>
+
+                  {feedScanError && (
+                    <div className="mt-2.5 flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 p-2.5 text-xs text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300">
+                      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                      <span>{feedScanError}</span>
+                    </div>
+                  )}
+
+                  {feedScanSummary && (
+                    <div className="mt-2.5 rounded-xl border border-sky-200 bg-sky-50/70 p-2.5 text-xs text-slate-700 dark:border-sky-800/60 dark:bg-sky-950/30 dark:text-slate-200">
+                      <span className="font-semibold text-[#003366] dark:text-sky-300">
+                        Prepared {feedScanSummary.jobsAdded} CV
+                        {feedScanSummary.jobsAdded === 1 ? '' : 's'}
+                      </span>{' '}
+                      &middot; {feedScanSummary.sourcesScanned} sources &middot;{' '}
+                      {feedScanSummary.pagesCrawled} pages crawled &middot;{' '}
+                      {feedScanSummary.candidatesFound} matches
+                      {feedScanSummary.errors.length > 0 && (
+                        <div className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">
+                          Notes: {feedScanSummary.errors.slice(0, 2).join(' | ')}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </form>
+
                 <div className="flex items-center justify-between">
                   <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                     Pending Review ({pendingJobs.length})
@@ -256,7 +379,7 @@ export function DashboardShell() {
                     onClick={() => setActiveTab('sources')}
                     className="text-xs font-semibold text-[#003366] hover:underline dark:text-sky-400"
                   >
-                    + Paste URL / Scan
+                    + Paste URL / Sources
                   </button>
                 </div>
 

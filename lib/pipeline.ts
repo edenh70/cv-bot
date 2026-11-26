@@ -11,12 +11,59 @@ interface PendingCandidate {
   url: string;
 }
 
+export interface ScanOptions {
+  maxNewJobs?: number;
+  maxSources?: number;
+  maxPagesPerSource?: number;
+  customPrompt?: string;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function prioritizeSourcesByPrompt(
+  sources: SourceRecord[],
+  customPrompt?: string,
+): SourceRecord[] {
+  if (!customPrompt || !customPrompt.trim()) {
+    return sources;
+  }
+
+  const normalizedPrompt = customPrompt.toLowerCase();
+  const tokens = normalizedPrompt
+    .split(/[\s,;:|/]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 3);
+
+  const scoreSource = (source: SourceRecord): number => {
+    const nameLower = source.name.toLowerCase();
+    let hostLower = '';
+    try {
+      hostLower = new URL(source.url).hostname.replace(/^www\./, '').toLowerCase();
+    } catch {
+      hostLower = source.url.toLowerCase();
+    }
+
+    if (normalizedPrompt.includes(nameLower)) return 2;
+    for (const token of tokens) {
+      if (nameLower.includes(token) || hostLower.includes(token)) {
+        return 1;
+      }
+    }
+    return 0;
+  };
+
+  return [...sources].sort((a, b) => scoreSource(b) - scoreSource(a));
+}
+
 export async function analyzeSingleJobUrl(
   rawUrl: string,
   options?: {
     sourceId?: string | null;
     companyHint?: string;
     titleHint?: string;
+    customPrompt?: string;
   },
 ): Promise<{ job: JobRecord; alreadyExisted: boolean }> {
   const url = normalizeAndValidateUrl(rawUrl);
@@ -40,6 +87,7 @@ export async function analyzeSingleJobUrl(
   const analysis = await analyzeAndTailorJob(url, markdown, {
     company: options?.companyHint,
     title: options?.titleHint,
+    customPrompt: options?.customPrompt,
   });
 
   const { data: inserted, error: insertError } = await supabase
@@ -76,7 +124,19 @@ export async function analyzeSingleJobUrl(
   return { job: inserted as JobRecord, alreadyExisted: false };
 }
 
-export async function runDailyScan(maxNewJobs = 3): Promise<ScanResultSummary> {
+export async function runDailyScan(
+  options: ScanOptions | number = {},
+): Promise<ScanResultSummary> {
+  const opts: ScanOptions =
+    typeof options === 'number' ? { maxNewJobs: options } : options;
+
+  const maxNewJobs = clamp(opts.maxNewJobs ?? 3, 1, 5);
+  const maxSources = clamp(opts.maxSources ?? 8, 1, 15);
+  const maxPagesPerSource = clamp(opts.maxPagesPerSource ?? 3, 1, 3);
+  const customPrompt = opts.customPrompt?.trim() || undefined;
+  const startedAt = Date.now();
+  const timeBudgetMs = 95_000;
+
   const supabase = getSupabaseAdmin();
   const syncErrors: string[] = [];
 
@@ -98,7 +158,10 @@ export async function runDailyScan(maxNewJobs = 3): Promise<ScanResultSummary> {
     throw new Error(`Failed to load sources: ${sourcesError.message}`);
   }
 
-  const activeSources = (sourcesData ?? []) as SourceRecord[];
+  const orderedSources = prioritizeSourcesByPrompt(
+    (sourcesData ?? []) as SourceRecord[],
+    customPrompt,
+  );
 
   const { data: existingUrlsData, error: urlsError } = await supabase
     .from('jobs')
@@ -114,6 +177,7 @@ export async function runDailyScan(maxNewJobs = 3): Promise<ScanResultSummary> {
 
   const summary: ScanResultSummary = {
     sourcesScanned: 0,
+    pagesCrawled: 0,
     candidatesFound: 0,
     jobsAdded: 0,
     jobsSkipped: 0,
@@ -123,43 +187,70 @@ export async function runDailyScan(maxNewJobs = 3): Promise<ScanResultSummary> {
 
   const toProcess: PendingCandidate[] = [];
 
-  for (const source of activeSources) {
-    if (toProcess.length >= maxNewJobs) {
+  for (const source of orderedSources) {
+    if (
+      toProcess.length >= maxNewJobs ||
+      summary.sourcesScanned >= maxSources ||
+      Date.now() - startedAt > timeBudgetMs
+    ) {
       break;
     }
 
     summary.sourcesScanned += 1;
 
     try {
-      const pageMarkdown = await scrapeUrlWithJina(source.url, 32000);
-      const candidates = await extractMatchingJobs(
-        source.name,
-        source.url,
-        pageMarkdown,
-      );
+      const visitedPages = new Set<string>();
+      let currentPageUrl: string | null = source.url;
+
+      for (let pageIdx = 0; pageIdx < maxPagesPerSource; pageIdx++) {
+        if (
+          !currentPageUrl ||
+          visitedPages.has(currentPageUrl) ||
+          toProcess.length >= maxNewJobs ||
+          Date.now() - startedAt > timeBudgetMs
+        ) {
+          break;
+        }
+
+        visitedPages.add(currentPageUrl);
+        const pageMarkdown = await scrapeUrlWithJina(currentPageUrl, 45000);
+        summary.pagesCrawled += 1;
+
+        const extraction = await extractMatchingJobs(
+          source.name,
+          currentPageUrl,
+          pageMarkdown,
+          customPrompt,
+        );
+
+        for (const candidate of extraction.jobs) {
+          summary.candidatesFound += 1;
+          if (knownUrls.has(candidate.url)) {
+            summary.jobsSkipped += 1;
+            continue;
+          }
+          knownUrls.add(candidate.url);
+          toProcess.push({
+            sourceId: source.id,
+            company: candidate.company,
+            title: candidate.title,
+            url: candidate.url,
+          });
+          if (toProcess.length >= maxNewJobs) {
+            break;
+          }
+        }
+
+        currentPageUrl =
+          extraction.nextPageUrl && !visitedPages.has(extraction.nextPageUrl)
+            ? extraction.nextPageUrl
+            : null;
+      }
 
       await supabase
         .from('sources')
         .update({ last_scanned_at: new Date().toISOString() })
         .eq('id', source.id);
-
-      for (const candidate of candidates) {
-        summary.candidatesFound += 1;
-        if (knownUrls.has(candidate.url)) {
-          summary.jobsSkipped += 1;
-          continue;
-        }
-        knownUrls.add(candidate.url);
-        toProcess.push({
-          sourceId: source.id,
-          company: candidate.company,
-          title: candidate.title,
-          url: candidate.url,
-        });
-        if (toProcess.length >= maxNewJobs) {
-          break;
-        }
-      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown scan error';
       console.error(`[cron/scan] Source "${source.name}" error:`, err);
@@ -174,6 +265,7 @@ export async function runDailyScan(maxNewJobs = 3): Promise<ScanResultSummary> {
           sourceId: candidate.sourceId,
           companyHint: candidate.company,
           titleHint: candidate.title,
+          customPrompt,
         }),
       ),
     );
