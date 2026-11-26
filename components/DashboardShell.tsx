@@ -18,6 +18,7 @@ import {
 import { JobCard } from './JobCard';
 import { QuickAddAndSourcesTab } from './QuickAddAndSourcesTab';
 import { AppliedHistoryTab } from './AppliedHistoryTab';
+import { ScanReportBox } from './ScanReportBox';
 import { DEFAULT_GOOGLE_SHEET_URL } from '@/lib/google-sheet';
 import type {
   JobRecord,
@@ -372,22 +373,7 @@ export function DashboardShell() {
                     </div>
                   )}
 
-                  {feedScanSummary && (
-                    <div className="mt-2.5 rounded-xl border border-sky-200 bg-sky-50/70 p-2.5 text-xs text-slate-700 dark:border-sky-800/60 dark:bg-sky-950/30 dark:text-slate-200">
-                      <span className="font-semibold text-[#003366] dark:text-sky-300">
-                        Prepared {feedScanSummary.jobsAdded} CV
-                        {feedScanSummary.jobsAdded === 1 ? '' : 's'}
-                      </span>{' '}
-                      &middot; {feedScanSummary.sourcesScanned} sources &middot;{' '}
-                      {feedScanSummary.pagesCrawled} pages crawled &middot;{' '}
-                      {feedScanSummary.candidatesFound} matches
-                      {feedScanSummary.errors.length > 0 && (
-                        <div className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">
-                          Notes: {feedScanSummary.errors.slice(0, 2).join(' | ')}
-                        </div>
-                      )}
-                    </div>
-                  )}
+                  {feedScanSummary && <ScanReportBox summary={feedScanSummary} />}
                 </form>
 
                 {!hasOriginalDocx && (

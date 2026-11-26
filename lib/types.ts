@@ -101,6 +101,29 @@ export interface JobExtractionResult {
   nextPageUrl: string | null;
 }
 
+export type SourceScanStatus = 'matched' | 'no_matches' | 'blocked' | 'error';
+
+export type PaginationStatus =
+  | 'single_page'
+  | 'switched_pages'
+  | 'followed_subpage'
+  | 'js_only'
+  | 'unknown';
+
+export interface ScannedSourceReport {
+  sourceId: string;
+  name: string;
+  url: string;
+  status: SourceScanStatus;
+  pagesCrawled: number;
+  pagesVisited: string[];
+  paginationStatus: PaginationStatus;
+  candidatesFound: number;
+  jobsAdded: number;
+  jobsSkipped: number;
+  note?: string;
+}
+
 export interface ScanResultSummary {
   sourcesScanned: number;
   pagesCrawled: number;
@@ -109,4 +132,5 @@ export interface ScanResultSummary {
   jobsSkipped: number;
   errors: string[];
   jobs: JobRecord[];
+  scannedSources: ScannedSourceReport[];
 }

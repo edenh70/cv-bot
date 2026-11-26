@@ -2,10 +2,20 @@ import { buildAndValidateTemplateCv } from './cv-validator';
 import { extractTailorableBlocksFromDocx } from './docx-template';
 import { analyzeAndTailorJob, extractMatchingJobs } from './gemini';
 import { syncSourcesFromGoogleSheet } from './google-sheet';
-import { normalizeAndValidateUrl, scrapeUrlWithJina } from './jina';
+import {
+  normalizeAndValidateUrl,
+  scrapePageWithJina,
+  scrapeUrlWithJina,
+} from './jina';
 import { getActiveMasterCv } from './master-cv-store';
 import { getSupabaseAdmin, JOB_PUBLIC_COLUMNS } from './supabase';
-import type { JobRecord, ScanResultSummary, SourceRecord, TailoredCV } from './types';
+import type {
+  JobRecord,
+  ScannedSourceReport,
+  ScanResultSummary,
+  SourceRecord,
+  TailoredCV,
+} from './types';
 
 interface PendingCandidate {
   sourceId: string;
@@ -21,11 +31,46 @@ export interface ScanOptions {
   customPrompt?: string;
 }
 
+const PROMPT_STOPWORDS = new Set([
+  'tech',
+  'high',
+  'low',
+  'jobs',
+  'job',
+  'careers',
+  'career',
+  'data',
+  'analyst',
+  'analysts',
+  'israel',
+  'company',
+  'companies',
+  'with',
+  'only',
+  'focus',
+  'find',
+  'roles',
+  'role',
+  'open',
+  'from',
+  'for',
+  'the',
+  'and',
+  'tel',
+  'aviv',
+]);
+
+const TRADITIONAL_SECTOR_REGEX =
+  /(בנק|ביטוח|פניקס|מנורה|הראל|לאומי|מזרחי|פועלים|דיסקונט|פלאפון|סלקום|אלביט|חילן|שופרסל|א\.מ\.ת|מסטרקארד|אגמטיקס|fnx\.co\.il|menoramivt|harel-group|mizrahi|leumi|cellcom|elbit|hilan|mastercard|icl-group)/i;
+
+const LOW_TECH_PROMPT_REGEX =
+  /(\blow[\s-]?tech\b|לואו[\s-]?טק|traditional|banks?|banking|insurance|finance|telecom|בנק|ביטוח|פיננס|תקשורת)/i;
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-function prioritizeSourcesByPrompt(
+export function prioritizeSourcesByPrompt(
   sources: SourceRecord[],
   customPrompt?: string,
 ): SourceRecord[] {
@@ -34,10 +79,11 @@ function prioritizeSourcesByPrompt(
   }
 
   const normalizedPrompt = customPrompt.toLowerCase();
+  const wantsTraditional = LOW_TECH_PROMPT_REGEX.test(normalizedPrompt);
   const tokens = normalizedPrompt
     .split(/[\s,;:|/]+/)
     .map((t) => t.trim())
-    .filter((t) => t.length >= 3);
+    .filter((t) => t.length >= 3 && !PROMPT_STOPWORDS.has(t));
 
   const scoreSource = (source: SourceRecord): number => {
     const nameLower = source.name.toLowerCase();
@@ -48,7 +94,10 @@ function prioritizeSourcesByPrompt(
       hostLower = source.url.toLowerCase();
     }
 
-    if (normalizedPrompt.includes(nameLower)) return 2;
+    if (normalizedPrompt.includes(nameLower)) return 3;
+    if (wantsTraditional && TRADITIONAL_SECTOR_REGEX.test(`${source.name} ${source.url}`)) {
+      return 2;
+    }
     for (const token of tokens) {
       if (nameLower.includes(token) || hostLower.includes(token)) {
         return 1;
@@ -163,7 +212,7 @@ export async function analyzeSingleJobUrl(
         tailoring_diffs_json: built.replacements,
         tailored_docx_base64: built.docxBuffer.toString('base64'),
         tailored_pdf_base64: built.pdfBuffer.toString('base64'),
-        status: 'pending_review' as const,
+        status: 'pending_review',
         validation_error: null,
       }
     : {
@@ -178,7 +227,7 @@ export async function analyzeSingleJobUrl(
         tailoring_diffs_json: built.replacements,
         tailored_docx_base64: null,
         tailored_pdf_base64: null,
-        status: 'failed_validation' as const,
+        status: 'failed_validation',
         validation_error: built.validationError,
       };
 
@@ -264,8 +313,10 @@ export async function runDailyScan(
     jobsSkipped: 0,
     errors: [...syncErrors],
     jobs: [],
+    scannedSources: [],
   };
 
+  const reportBySourceId = new Map<string, ScannedSourceReport>();
   const toProcess: PendingCandidate[] = [];
 
   for (const source of orderedSources) {
@@ -278,6 +329,20 @@ export async function runDailyScan(
     }
 
     summary.sourcesScanned += 1;
+    const sourceReport: ScannedSourceReport = {
+      sourceId: source.id,
+      name: source.name,
+      url: source.url,
+      status: 'no_matches',
+      pagesCrawled: 0,
+      pagesVisited: [],
+      paginationStatus: 'single_page',
+      candidatesFound: 0,
+      jobsAdded: 0,
+      jobsSkipped: 0,
+    };
+    summary.scannedSources.push(sourceReport);
+    reportBySourceId.set(source.id, sourceReport);
 
     try {
       const visitedPages = new Set<string>();
@@ -294,20 +359,35 @@ export async function runDailyScan(
         }
 
         visitedPages.add(currentPageUrl);
-        const pageMarkdown = await scrapeUrlWithJina(currentPageUrl, 45000);
+        sourceReport.pagesVisited.push(currentPageUrl);
+
+        const scraped = await scrapePageWithJina(currentPageUrl, 45000);
         summary.pagesCrawled += 1;
+        sourceReport.pagesCrawled += 1;
+
+        if (scraped.blockedReason) {
+          sourceReport.status = 'blocked';
+          sourceReport.paginationStatus = 'unknown';
+          sourceReport.note = scraped.blockedReason;
+          summary.errors.push(`${source.name}: ${scraped.blockedReason}`);
+          break;
+        }
 
         const extraction = await extractMatchingJobs(
           source.name,
           currentPageUrl,
-          pageMarkdown,
+          scraped.markdown,
           customPrompt,
         );
 
         for (const candidate of extraction.jobs) {
           summary.candidatesFound += 1;
+          sourceReport.candidatesFound += 1;
+          sourceReport.status = 'matched';
+
           if (knownUrls.has(candidate.url)) {
             summary.jobsSkipped += 1;
+            sourceReport.jobsSkipped += 1;
             continue;
           }
           knownUrls.add(candidate.url);
@@ -322,10 +402,39 @@ export async function runDailyScan(
           }
         }
 
-        currentPageUrl =
-          extraction.nextPageUrl && !visitedPages.has(extraction.nextPageUrl)
-            ? extraction.nextPageUrl
-            : null;
+        // Page switching priority: deterministic next-page URL -> Gemini nextPageUrl -> subpage/ATS on page 1
+        let nextUrl: string | null = null;
+        if (scraped.nextPageUrl && !visitedPages.has(scraped.nextPageUrl)) {
+          nextUrl = scraped.nextPageUrl;
+          sourceReport.paginationStatus = 'switched_pages';
+        } else if (
+          extraction.nextPageUrl &&
+          !visitedPages.has(extraction.nextPageUrl)
+        ) {
+          nextUrl = extraction.nextPageUrl;
+          sourceReport.paginationStatus = 'switched_pages';
+        } else if (
+          pageIdx === 0 &&
+          extraction.jobs.length === 0 &&
+          scraped.subpageCareerUrl &&
+          !visitedPages.has(scraped.subpageCareerUrl)
+        ) {
+          nextUrl = scraped.subpageCareerUrl;
+          sourceReport.paginationStatus = 'followed_subpage';
+        } else if (scraped.hasJsOnlyPagination && sourceReport.pagesVisited.length === 1) {
+          sourceReport.paginationStatus = 'js_only';
+          sourceReport.note =
+            sourceReport.note || 'Page 1 only (JS button pagination)';
+        }
+
+        currentPageUrl = nextUrl;
+      }
+
+      if (sourceReport.pagesCrawled > 1 && !sourceReport.note) {
+        sourceReport.note =
+          sourceReport.paginationStatus === 'followed_subpage'
+            ? `Followed careers link (${sourceReport.pagesCrawled} pages)`
+            : `Switched ${sourceReport.pagesCrawled} pages`;
       }
 
       await supabase
@@ -335,7 +444,16 @@ export async function runDailyScan(
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown scan error';
       console.error(`[cron/scan] Source "${source.name}" error:`, err);
+      sourceReport.status = 'error';
+      sourceReport.paginationStatus = 'unknown';
+      sourceReport.note = msg;
       summary.errors.push(`${source.name}: ${msg}`);
+
+      // Advance last_scanned_at so failing sites don't block the front of the queue on repeat scans
+      await supabase
+        .from('sources')
+        .update({ last_scanned_at: new Date().toISOString() })
+        .eq('id', source.id);
     }
   }
 
@@ -360,12 +478,19 @@ export async function runDailyScan(
 
     settled.forEach((result, idx) => {
       const candidate = toProcess[idx];
+      const sourceReport = reportBySourceId.get(candidate.sourceId);
+
       if (result.status === 'fulfilled') {
         if (result.value.alreadyExisted) {
           summary.jobsSkipped += 1;
+          if (sourceReport) sourceReport.jobsSkipped += 1;
         } else {
           summary.jobsAdded += 1;
           summary.jobs.push(result.value.job);
+          if (sourceReport) {
+            sourceReport.jobsAdded += 1;
+            sourceReport.status = 'matched';
+          }
         }
       } else {
         const msg =
@@ -374,6 +499,9 @@ export async function runDailyScan(
             : 'Failed to analyze job';
         console.error(`[cron/scan] Job "${candidate.url}" error:`, result.reason);
         summary.errors.push(`${candidate.title}: ${msg}`);
+        if (sourceReport) {
+          sourceReport.note = `Match found (${candidate.title}), CV failed: ${msg}`;
+        }
       }
     });
   }

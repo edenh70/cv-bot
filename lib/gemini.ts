@@ -18,7 +18,7 @@ import {
   surgicalJobAnalysisResponseSchema,
   uploadedCvParseResponseSchema,
 } from './cv-schema';
-import { resolveCandidateUrl } from './jina';
+import { isKnownExternalAtsHost, resolveCandidateUrl } from './jina';
 import type {
   ExtractedJobCandidate,
   JobExtractionResult,
@@ -162,14 +162,16 @@ export async function extractMatchingJobs(
     `You are an expert technical recruiter extracting relevant Data Analyst job listings from a company career page.`,
     `Source Name: ${sourceName}`,
     `Source URL: ${sourceUrl}`,
-    customPrompt ? `User Focus Instructions: ${customPrompt}` : '',
+    customPrompt
+      ? `User Focus Preference (use to prioritize/rank relevant sources & roles, do NOT exclude valid Israel Data/Product/BI Analyst positions solely due to broad industry wording): ${customPrompt}`
+      : '',
     ``,
     `Inclusion criteria (ALL must hold):`,
     `1. Include roles matching: Data Analyst, Senior Data Analyst, Product Analyst, Senior Product Analyst, BI Analyst, Business Intelligence Analyst, Big Data Analyst, Marketing/Growth/Revenue/Risk/Fraud/Operations Data Analyst, Analytics Engineer, Data Analyst / Data Scientist hybrid roles, and Hebrew titles (דאטה אנליסט, אנליסט נתונים, אנליסט מוצר, אנליסט BI).`,
     `2. Exclude VP, Director, Head of, Team Lead / People Manager, Principal/Staff Software Engineer, pure Backend/Frontend/Fullstack/DevOps/QA Engineer, and Intern/Student roles.`,
     `3. Location must be Israel, Tel Aviv / Tel Aviv-Yafo, Central Israel, Hybrid (Israel), or Remote (eligible from Israel). Exclude roles explicitly located outside Israel (e.g., Prague, NYC, London, Berlin) unless marked Remote from Israel.`,
     `4. Each entry MUST have a specific job posting URL (resolve relative links against ${sourceUrl} if needed). Skip generic career homepages without a job ID/slug.`,
-    `5. Pagination: If the page has a link to the next page of job listings (e.g., "Next", "Page 2", "?page=2"), set "nextPageUrl" to that resolved URL; otherwise set "nextPageUrl" to "".`,
+    `5. Pagination / Careers Board Link: If the page has a link to the next page of job listings (e.g., "Next", "Page 2", "?page=2", "/2/2") or a direct link to the company's ATS job board (Greenhouse, Comeet, Lever, Workday, Ashby), set "nextPageUrl" to that resolved URL (NEVER "#"); otherwise set "nextPageUrl" to "".`,
     ``,
     `Career page markdown:`,
     markdown,
@@ -231,7 +233,8 @@ export async function extractMatchingJobs(
       if (
         resolvedNext &&
         resolvedNext !== sourceUrl &&
-        new URL(resolvedNext).hostname === new URL(sourceUrl).hostname
+        (new URL(resolvedNext).hostname === new URL(sourceUrl).hostname ||
+          isKnownExternalAtsHost(resolvedNext))
       ) {
         nextPageUrl = resolvedNext;
       }

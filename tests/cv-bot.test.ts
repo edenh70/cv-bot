@@ -23,9 +23,15 @@ import {
   parseCsv,
   toGoogleSheetCsvUrl,
 } from '../lib/google-sheet';
-import { cleanScrapedMarkdown, normalizeAndValidateUrl } from '../lib/jina';
+import {
+  cleanScrapedMarkdown,
+  detectBotBlock,
+  extractNavigationFromMarkdown,
+  normalizeAndValidateUrl,
+} from '../lib/jina';
+import { prioritizeSourcesByPrompt } from '../lib/pipeline';
 import { getDefaultMasterCvTemplate, MASTER_CV } from '../lib/master-cv';
-import type { TailoredCV, TailoringDiffMap } from '../lib/types';
+import type { SourceRecord, TailoredCV, TailoringDiffMap } from '../lib/types';
 
 function makeValidMasterTailoredCv(): TailoredCV {
   return {
@@ -392,4 +398,87 @@ test('cleanScrapedMarkdown strips tracking pixels while keeping job links, and U
 
   assert.throws(() => normalizeAndValidateUrl('http://localhost:3000/test'));
   assert.throws(() => normalizeAndValidateUrl('http://192.168.1.1/admin'));
+});
+
+test('extractNavigationFromMarkdown switches Next/?page=2 URLs beyond 45k chars and flags JS-only # pagination', () => {
+  const longPaddedMarkdown = [
+    '# Israel Jobs',
+    'x '.repeat(26000),
+    '[Sr Data Analyst](https://jobs.paloaltonetworks.com/en/job/tel-aviv/sr-data-analyst/47263/101)',
+    '[Next](https://jobs.paloaltonetworks.com/en/location/israel-jobs/47263/294640/2/2)',
+  ].join('\n');
+
+  // Truncated markdown keeps both head & tail via cleanScrapedMarkdown
+  const truncatedForLlm = cleanScrapedMarkdown(longPaddedMarkdown, 45000);
+  assert.ok(truncatedForLlm.includes('sr-data-analyst'));
+
+  const navPage1 = extractNavigationFromMarkdown(
+    longPaddedMarkdown,
+    'https://jobs.paloaltonetworks.com/en/location/israel-jobs/47263/294640/2',
+  );
+  assert.equal(
+    navPage1.nextPageUrl,
+    'https://jobs.paloaltonetworks.com/en/location/israel-jobs/47263/294640/2/2',
+  );
+  assert.equal(navPage1.hasJsOnlyPagination, false);
+
+  const navPage2 = extractNavigationFromMarkdown(
+    '[Next](https://jobs.paloaltonetworks.com/en/location/israel-jobs/47263/294640/2/3)',
+    'https://jobs.paloaltonetworks.com/en/location/israel-jobs/47263/294640/2/2',
+  );
+  assert.equal(
+    navPage2.nextPageUrl,
+    'https://jobs.paloaltonetworks.com/en/location/israel-jobs/47263/294640/2/3',
+  );
+
+  // JS-only # pagination (like Phoenix Nuxt button pagination) must NOT loop on #
+  const jsNav = extractNavigationFromMarkdown(
+    '[2](https://www.fnx.co.il/career/open-positions/#)\n[הבא](https://www.fnx.co.il/career/open-positions/#)',
+    'https://www.fnx.co.il/career/open-positions/',
+  );
+  assert.equal(jsNav.nextPageUrl, null);
+  assert.equal(jsNav.hasJsOnlyPagination, true);
+
+  // Homepage -> external ATS board discovery
+  const atsNav = extractNavigationFromMarkdown(
+    'We are hiring! [See open roles](https://job-boards.greenhouse.io/exampleco)',
+    'https://exampleco.com/',
+  );
+  assert.equal(atsNav.subpageCareerUrl, 'https://job-boards.greenhouse.io/exampleco');
+});
+
+test('detectBotBlock catches Cloudflare WAF walls while passing real job boards', () => {
+  const cfBlock = [
+    '# Sorry, you have been blocked',
+    'Cloudflare Ray ID: a6091b9c9cdfc93f',
+    '[Cloudflare](https://www.cloudflare.com/5xx-error-landing)',
+  ].join('\n');
+  assert.equal(detectBotBlock(cfBlock), 'Blocked by Cloudflare WAF');
+
+  const normalBoard = `${'[Data Analyst](https://jobs.example.com/1)\n'.repeat(10)}Cloudflare security footer`;
+  assert.equal(detectBotBlock(normalBoard), null);
+});
+
+test('prioritizeSourcesByPrompt boosts traditional sector sources for "low tech" and avoids high-tech false positives', () => {
+  const mkSource = (name: string, url: string): SourceRecord => ({
+    id: name,
+    name,
+    url,
+    is_active: true,
+    last_scanned_at: null,
+    created_at: new Date().toISOString(),
+  });
+
+  const input = [
+    mkSource('דיאלוג (Dialog)', 'https://www.dialog.co.il/high-tech/jobs'),
+    mkSource('Innovid', 'https://jobs.techaviv.com/jobs/innovid'),
+    mkSource('הפניקס', 'https://www.fnx.co.il/career/open-positions/'),
+    mkSource('בנק לאומי', 'https://www.drushim.co.il/jobs/23181'),
+  ];
+
+  const ordered = prioritizeSourcesByPrompt(input, 'low tech');
+  assert.ok(
+    ['הפניקס', 'בנק לאומי'].includes(ordered[0].name) &&
+      ['הפניקס', 'בנק לאומי'].includes(ordered[1].name),
+  );
 });

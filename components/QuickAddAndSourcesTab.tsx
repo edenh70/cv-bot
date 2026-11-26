@@ -16,6 +16,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { MasterCvCard } from './MasterCvCard';
+import { ScanReportBox } from './ScanReportBox';
 import type {
   JobRecord,
   MasterCvProfilePublic,
@@ -443,24 +444,8 @@ export function QuickAddAndSourcesTab({
         )}
 
         {scanResult && (
-          <div className="mb-3 rounded-xl border border-sky-200 bg-sky-50/70 p-3 text-xs text-slate-700 dark:border-sky-800/60 dark:bg-sky-950/30 dark:text-slate-200">
-            <div className="font-semibold text-[#003366] dark:text-sky-300">
-              Scan Complete: {scanResult.jobsAdded} new job
-              {scanResult.jobsAdded === 1 ? '' : 's'} added
-            </div>
-            <div className="mt-1 text-slate-600 dark:text-slate-400">
-              {scanResult.sourcesScanned} sources scanned &middot;{' '}
-              {scanResult.pagesCrawled} pages crawled &middot;{' '}
-              {scanResult.candidatesFound} Data Analyst matches &middot;{' '}
-              {scanResult.jobsSkipped} already processed
-            </div>
-            {scanResult.errors.length > 0 && (
-              <ul className="mt-1.5 list-disc pl-4 text-rose-600 dark:text-rose-400">
-                {scanResult.errors.map((err, i) => (
-                  <li key={i}>{err}</li>
-                ))}
-              </ul>
-            )}
+          <div className="mb-3">
+            <ScanReportBox summary={scanResult} />
           </div>
         )}
 
